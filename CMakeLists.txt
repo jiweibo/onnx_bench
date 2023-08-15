@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.18)
+
+project(onnx_bench CXX)
+
+option(ORT_ROOTDIR, "onnxruntime root dir")
+
+set(CMAKE_CXX_STANDARD 17)
+
+include_directories("/usr/include")
+link_directories("/usr/lib")
+link_directories("/usr/lib/x86_64-linux-gnu/")
+
+include_directories("/usr/local/include")
+link_directories("/usr/local/lib")
+
+include_directories("${ORT_ROOTDIR}/include")
+include_directories("${ORT_ROOTDIR}/include/onnxruntime")
+include_directories("${ORT_ROOTDIR}/include/onnxruntime/core/session")
+link_directories("${ORT_ROOTDIR}/lib")
+
+set(DEPS glog gflags)
+
+add_executable(onnx_bench main.cc)
+target_link_libraries(onnx_bench onnxruntime)
+target_link_libraries(onnx_bench ${DEPS})
