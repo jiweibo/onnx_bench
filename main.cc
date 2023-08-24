@@ -2,32 +2,60 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <numeric>
 #include <random>
+#include <ratio>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 
+#if ORT_API_VERSION >= 13
 #include "core/providers/tensorrt/tensorrt_provider_options.h"
+#endif
 #include "onnxruntime_c_api.h"
 #include "onnxruntime_cxx_api.h"
 
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
-DEFINE_string(onnx_file, "", "onnx model file");
+DEFINE_string(onnx, "", "onnx model file");
 DEFINE_int32(batch, 1, "batch");
 DEFINE_int32(warmup, 0, "warmup");
 DEFINE_int32(repeats, 1, "repeats");
+DEFINE_string(precision, "fp32", "fp32, fp16, int8");
 DEFINE_string(provider, "cpu", "cpu, cuda, trt");
+DEFINE_string(cacheDir, "", "the cache dir");
+DEFINE_string(dumpOutput, "",
+              "Print the output tensor(s) of the last inference iteration "
+              "(default = disabled).");
+
+// TODO:
+DEFINE_string(
+    loadInputs, "",
+    "Load input values from files (default = generate random inputs). Input "
+    "names can be wrapped with single quotes (ex: 'Input:0.in')");
+DEFINE_string(inputType, "txt", "txt, bin etc.");
+
+std::default_random_engine e(1998);
+
+const char *SEP = "-SEP-";
 
 namespace {
+void SetEnvironmentVars(
+    const std::unordered_map<std::string, std::string> &env_vars) {
+  for (const auto &env_var : env_vars) {
+    CHECK(setenv(env_var.first.c_str(), env_var.second.c_str(), 1) == 0)
+        << "Set env failed " << env_var.first << ":" << env_var.second;
+  }
+}
+
 void *GenerateData(const std::vector<int64_t> &dims,
                    ONNXTensorElementDataType type) {
   size_t num =
       std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
-  std::default_random_engine e;
-  e.seed(1998);
 
   if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     float *ptr = static_cast<float *>(malloc(num * sizeof(float)));
@@ -117,6 +145,48 @@ float MeanValue(const Ort::Value &tensor) {
   }
 }
 
+void DumpTensors(const std::vector<Ort::Value> &tensors,
+                 const std::vector<std::string> &names,
+                 const std::string &filename) {
+  CHECK_EQ(tensors.size(), names.size());
+  std::ofstream out(filename);
+  for (size_t i = 0; i < tensors.size(); ++i) {
+    auto &tensor = tensors[i];
+    auto &name = names[i];
+    out << name << SEP;
+    auto type_info = tensor.GetTensorTypeAndShapeInfo();
+    auto type = type_info.GetElementType();
+    auto dims = type_info.GetShape();
+    size_t num =
+        std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
+
+    if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      auto *data = tensor.GetTensorData<float>();
+      for (size_t i = 0; i < num - 1; ++i) {
+        out << data[i] << " ";
+      }
+      out << data[num - 1];
+      // return mean(data, num);
+    } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+      auto *data = tensor.GetTensorData<int>();
+      for (size_t i = 0; i < num - 1; ++i) {
+        out << data[i] << " ";
+      }
+      out << data[num - 1];
+    } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+      auto *data = tensor.GetTensorData<int64_t>();
+      for (size_t i = 0; i < num - 1; ++i) {
+        out << data[i] << " ";
+      }
+      out << data[num - 1];
+    } else {
+      LOG(FATAL) << "Not supported data type " << type;
+    }
+    out << "\n";
+  }
+  out.close();
+}
+
 class StopWatchTimer {
 public:
   StopWatchTimer()
@@ -201,34 +271,81 @@ void Run() {
   const auto &api = Ort::GetApi();
 
   if (FLAGS_provider == "cpu") {
-
+#if ORT_API_VERSION <= 7
+#elif ORT_API_VERSION >= 13
+#endif
   } else if (FLAGS_provider == "cuda") {
-    OrtCUDAProviderOptions o;
-    memset(&o, 0, sizeof(o));
-    o.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
-    o.gpu_mem_limit = SIZE_MAX;
-    OrtStatus *onnx_status =
-        api.SessionOptionsAppendExecutionProvider_CUDA(session_options, &o);
+#if ORT_API_VERSION <= 7
+    session_options.AppendExecutionProvider_CUDA(
+        /*cuda_options=*/{0, OrtCudnnConvAlgoSearch::HEURISTIC,
+                          /*cuda_mem_limit=*/std::numeric_limits<size_t>::max(),
+                          /*arena_extend_strategy=*/0, // kNextPowerOfTwo
+                          /*do_copy_in_default_stream=*/false,
+                          /*has_user_compute_stream=*/false,
+                          /*user_compute_stream=*/nullptr});
 
-    // OrtCUDAProviderOptionsV2* cuda_options = nullptr;
-    // api.CreateCUDAProviderOptions(&cuda_options);
-    // std::vector<const char*> keys{"cudnn_conv1d_pad_to_nc1d"};
-    // std::vector<const char*> values{"1"};
-    // api.UpdateCUDAProviderOptions(cuda_options, keys.data(), values.data(),
-    // 1); api.SessionOptionsAppendExecutionProvider_CUDA_V2(session_options,
-    // cuda_options);
+#elif ORT_API_VERSION >= 13
+    OrtCUDAProviderOptions cuda_opt;
+    cuda_opt.device_id = 0;
+    cuda_opt.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+    cuda_opt.gpu_mem_limit = SIZE_MAX;
+    cuda_opt.do_copy_in_default_stream = false;
+    cuda_opt.has_user_compute_stream = false;
+    cuda_opt.user_compute_stream = nullptr;
+    session_options.AppendExecutionProvider_CUDA(cuda_opt);
+#endif
   } else if (FLAGS_provider == "trt") {
-    OrtTensorRTProviderOptionsV2 *tensorrt_options;
-    Ort::ThrowOnError(api.CreateTensorRTProviderOptions(&tensorrt_options));
-    std::unique_ptr<OrtTensorRTProviderOptionsV2,
-                    decltype(api.ReleaseTensorRTProviderOptions)>
-        rel_trt_options(tensorrt_options, api.ReleaseTensorRTProviderOptions);
-    Ort::ThrowOnError(api.SessionOptionsAppendExecutionProvider_TensorRT_V2(
-        static_cast<OrtSessionOptions *>(session_options),
-        rel_trt_options.get()));
+#if ORT_API_VERSION <= 7
+    session_options.AppendExecutionProvider_TensorRT(
+        {/*tensorrt_options=*/0,
+         /*has_user_compute_stream=*/false,
+         /*user_compute_stream=*/nullptr});
+
+    std::unordered_map<std::string, std::string> cfgs;
+    cfgs["ORT_TENSORRT_MAX_PARTITION_ITERATIONS"] = "1000";
+    cfgs["ORT_TENSORRT_MIN_SUBGRAPH_SIZE"] = "1";
+    cfgs["ORT_TENSORRT_MAX_WORKSPACE_SIZE"] = "1073741824";
+    cfgs["ORT_TENSORRT_ENGINE_CACHE_ENABLE"] = FLAGS_cacheDir != "" ? "1" : "0";
+    cfgs["ORT_TENSORRT_CACHE_PATH"] = FLAGS_cacheDir;
+    cfgs["ORT_TENSORRT_FP16_ENABLE"] = FLAGS_precision == "fp16" ? "1" : "0";
+
+    cfgs["ORT_TENSORRT_FILTERED_OPS"] = "";
+
+    //   {"ORT_TENSORRT_INT8_ENABLE", "0"},
+    //   {"ORT_TENSORRT_INT8_CALIBRATION_TABLE_NAME", ""},
+    // };
+    SetEnvironmentVars(cfgs);
+
+#elif ORT_API_VERSION >= 13
+    OrtTensorRTProviderOptions trt_opt{};
+    trt_opt.device_id = 0;
+    trt_opt.has_user_compute_stream = false;
+    trt_opt.user_compute_stream = nullptr;
+    trt_opt.trt_max_partition_iterations = 1000;
+    trt_opt.trt_min_subgraph_size = 1;
+    trt_opt.trt_max_workspace_size = 1073741824;
+    trt_opt.trt_fp16_enable = FLAGS_precision == "fp16";
+    trt_opt.trt_int8_enable = FLAGS_precision == "int8";
+    trt_opt.trt_engine_cache_enable = FLAGS_cacheDir != "";
+    trt_opt.trt_engine_cache_path = FLAGS_cacheDir.c_str();
+    trt_opt.trt_filter_ops = "Gather_1660";
+    trt_opt.trt_dump_subgraphs = true;
+    // if (int8_enable) {
+    //     trt_opt.trt_int8_calibration_table_name =
+    //     int8_calibration_table_file.filename().c_str();
+    // }
+
+    session_options.AppendExecutionProvider_TensorRT(trt_opt);
+#endif
   }
 
-  Ort::Session session(env, FLAGS_onnx_file.c_str(), session_options);
+  auto session_start = std::chrono::high_resolution_clock::now();
+  Ort::Session session(env, FLAGS_onnx.c_str(), session_options);
+  auto session_end = std::chrono::high_resolution_clock::now();
+  auto dur =
+      std::chrono::duration<double, std::milli>(session_end - session_start)
+          .count();
+  LOG(INFO) << "Init session time is " << dur << ", ms";
 
   Ort::AllocatorWithDefaultOptions allocator;
 
@@ -251,7 +368,11 @@ void Run() {
   // Iterator over all input nodes
   for (size_t i = 0; i < num_input_nodes; ++i) {
     // print input node names
+#if ORT_API_VERSION <= 7
+    input_names.push_back(session.GetInputName(i, allocator));
+#elif ORT_API_VERSION >= 13
     input_names.push_back(session.GetInputNameAllocated(i, allocator).get());
+#endif
     input_names_char.push_back(input_names[i].c_str());
 
     // print input node types
@@ -292,7 +413,11 @@ void Run() {
   LOG(INFO) << "Number of outputs " << num_output_nodes;
 
   for (size_t i = 0; i < num_output_nodes; ++i) {
+#if ORT_API_VERSION <= 7
+    output_names.push_back(session.GetOutputName(i, allocator));
+#elif ORT_API_VERSION >= 13
     output_names.push_back(session.GetOutputNameAllocated(i, allocator).get());
+#endif
     output_names_char.push_back(output_names.back().c_str());
 
     auto type_info = session.GetOutputTypeInfo(i);
@@ -330,6 +455,8 @@ void Run() {
         LOG(INFO) << "Mean value " << j << " : "
                   << MeanValue(output_tensors[j]);
       }
+      if (FLAGS_dumpOutput != "")
+        DumpTensors(output_tensors, output_names, FLAGS_dumpOutput);
     }
   }
   LOG(INFO) << "Average cost time: " << timer.GetAverageTime() << " ms.";
@@ -341,8 +468,8 @@ void Run() {
 
 int main(int argc, char **argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
-  if (FLAGS_onnx_file == "") {
-    LOG(FATAL) << "Please set --onnx_file flag.";
+  if (FLAGS_onnx == "") {
+    LOG(FATAL) << "Please set --onnx flag.";
   }
   Run();
 }
