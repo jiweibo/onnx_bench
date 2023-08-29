@@ -24,6 +24,13 @@ def parse_onnx_outputs(filename):
     output_names = []
     for i in range(num):
         output_names.append(model.graph.output[i].name)
+
+
+    # for binary.
+    # all_nodes = model.graph.node
+    # node_len = len(all_nodes)
+    # down_binary_names = all_nodes[int(node_len/2)].output
+
     return ",".join(output_names)
 
 
@@ -40,6 +47,8 @@ if __name__ == "__main__":
         input_nodes = args.input_nodes.split(",")
         if input_nodes != base_input_nodes:
             skip_prune = False
+    else:
+        input_nodes = base_input_nodes
 
     if args.output_nodes is not None:
         output_nodes = args.output_nodes.split(",")

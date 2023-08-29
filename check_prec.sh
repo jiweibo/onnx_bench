@@ -21,13 +21,24 @@ ONNX_BENCH=./build/onnx_bench
 
 # prune model
 prune_model=$tmp_dir/pruned.onnx
-$PYTHON prune.py $model $prune_model $node_names
+if [ -z "$node_name" ];then
+    $PYTHON prune.py $model $prune_model
+else
+    $PYTHON prune.py $model $prune_model --output_nodes $node_names
+fi
 
 # run model to get output
 base_out=$tmp_dir/${base_provider}_out.txt
 ref_out=$tmp_dir/${ref_provider}_out.txt
-$ONNX_BENCH --onnx $prune_model --provider $base_provider --dumpOutput $base_out
-$ONNX_BENCH --onnx $prune_model --provider $ref_provider --dumpOutput $ref_out
+
+# export ORT_DEBUG_NODE_IO_DUMP_SHAPE_DATA=1
+# export ORT_DEBUG_NODE_IO_DUMP_NODE_PLACEMENT=1
+# export ORT_DEBUG_NODE_IO_DUMP_INPUT_DATA=0
+# export ORT_DEBUG_NODE_IO_DUMP_OUTPUT_DATA=1
+# export ORT_DEBUG_NODE_IO_DUMP_DATA_DESTINATION=stdout
+
+$ONNX_BENCH --onnx $prune_model --provider $base_provider --dumpOutput $base_out > cpu.txt
+$ONNX_BENCH --onnx $prune_model --provider $ref_provider --dumpOutput $ref_out > trt.txt
 
 # check precision
 $PYTHON check.py $base_out $ref_out

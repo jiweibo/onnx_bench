@@ -18,6 +18,8 @@
 #include "onnxruntime_c_api.h"
 #include "onnxruntime_cxx_api.h"
 
+#include <cuda_runtime.h>
+
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
@@ -31,6 +33,7 @@ DEFINE_string(cacheDir, "", "the cache dir");
 DEFINE_string(dumpOutput, "",
               "Print the output tensor(s) of the last inference iteration "
               "(default = disabled).");
+// DEFINE_string(trtFilterOps, "", "defaule empty, e.g. 'Flatten_125 Flatten_126'");
 
 // TODO:
 DEFINE_string(
@@ -140,6 +143,9 @@ float MeanValue(const Ort::Value &tensor) {
   } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
     auto *data = tensor.GetTensorData<int64_t>();
     return mean(data, num);
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
+    auto *data = tensor.GetTensorData<bool>();
+    return mean(data, num);
   } else {
     LOG(FATAL) << "Not supported data type " << type;
   }
@@ -175,6 +181,12 @@ void DumpTensors(const std::vector<Ort::Value> &tensors,
       out << data[num - 1];
     } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
       auto *data = tensor.GetTensorData<int64_t>();
+      for (size_t i = 0; i < num - 1; ++i) {
+        out << data[i] << " ";
+      }
+      out << data[num - 1];
+    } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
+      auto *data = tensor.GetTensorData<bool>();
       for (size_t i = 0; i < num - 1; ++i) {
         out << data[i] << " ";
       }
@@ -322,14 +334,14 @@ void Run() {
     trt_opt.has_user_compute_stream = false;
     trt_opt.user_compute_stream = nullptr;
     trt_opt.trt_max_partition_iterations = 1000;
-    trt_opt.trt_min_subgraph_size = 1;
+    trt_opt.trt_min_subgraph_size = 3;
     trt_opt.trt_max_workspace_size = 1073741824;
     trt_opt.trt_fp16_enable = FLAGS_precision == "fp16";
     trt_opt.trt_int8_enable = FLAGS_precision == "int8";
     trt_opt.trt_engine_cache_enable = FLAGS_cacheDir != "";
     trt_opt.trt_engine_cache_path = FLAGS_cacheDir.c_str();
-    trt_opt.trt_filter_ops = "Gather_1660";
-    trt_opt.trt_dump_subgraphs = true;
+    // trt_opt.trt_filter_ops = FLAGS_trtFilterOps.c_str();
+    trt_opt.trt_dump_subgraphs = false;
     // if (int8_enable) {
     //     trt_opt.trt_int8_calibration_table_name =
     //     int8_calibration_table_file.filename().c_str();
@@ -437,6 +449,7 @@ void Run() {
         Ort::RunOptions{nullptr}, input_names_char.data(), input_tensors.data(),
         num_input_nodes, output_names_char.data(), num_output_nodes);
   }
+  cudaDeviceSynchronize();
   auto end = std::chrono::high_resolution_clock::now();
   auto time = std::chrono::duration<double, std::milli>(end - start).count();
   LOG(INFO) << "warmup done, time is " << time << " ms.";
@@ -448,6 +461,7 @@ void Run() {
     auto output_tensors = session.Run(
         Ort::RunOptions{nullptr}, input_names_char.data(), input_tensors.data(),
         num_input_nodes, output_names_char.data(), num_output_nodes);
+    cudaDeviceSynchronize();
     timer.Stop();
 
     if (i == FLAGS_repeats - 1) {

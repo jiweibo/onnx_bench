@@ -13,12 +13,15 @@ link_directories("/usr/lib/x86_64-linux-gnu/")
 include_directories("/usr/local/include")
 link_directories("/usr/local/lib")
 
+include_directories("/usr/local/cuda/include")
+link_directories("/usr/local/cuda/lib64")
+
 include_directories("${ORT_ROOTDIR}/include")
 include_directories("${ORT_ROOTDIR}/include/onnxruntime")
 include_directories("${ORT_ROOTDIR}/include/onnxruntime/core/session")
 link_directories("${ORT_ROOTDIR}/lib")
 
-set(DEPS glog gflags)
+set(DEPS glog gflags cudart)
 
 add_executable(onnx_bench main.cc)
 target_link_libraries(onnx_bench onnxruntime)
