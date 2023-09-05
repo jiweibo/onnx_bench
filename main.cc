@@ -33,7 +33,9 @@ DEFINE_string(cacheDir, "", "the cache dir");
 DEFINE_string(dumpOutput, "",
               "Print the output tensor(s) of the last inference iteration "
               "(default = disabled).");
-// DEFINE_string(trtFilterOps, "", "defaule empty, e.g. 'Flatten_125 Flatten_126'");
+DEFINE_string(trtFilterOps, "", "defaule empty, e.g. 'Flatten_125 Flatten_126'");
+DEFINE_string(trtPreferFp32Ops, "", "prefer fp32 ops");
+DEFINE_string(trtPreferFp32Nodes, "", "prefer fp32 nodes");
 
 // TODO:
 DEFINE_string(
@@ -199,6 +201,83 @@ void DumpTensors(const std::vector<Ort::Value> &tensors,
   out.close();
 }
 
+void SetCudaProviders(Ort::SessionOptions &session_options) {
+#if ORT_API_VERSION <= 7
+  session_options.AppendExecutionProvider_CUDA(
+      /*cuda_options=*/{0, OrtCudnnConvAlgoSearch::HEURISTIC,
+                        /*cuda_mem_limit=*/std::numeric_limits<size_t>::max(),
+                        /*arena_extend_strategy=*/0, // kNextPowerOfTwo
+                        /*do_copy_in_default_stream=*/false,
+                        /*has_user_compute_stream=*/false,
+                        /*user_compute_stream=*/nullptr});
+
+#elif ORT_API_VERSION >= 13
+  OrtCUDAProviderOptions cuda_opt;
+  cuda_opt.device_id = 0;
+  cuda_opt.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+  cuda_opt.gpu_mem_limit = SIZE_MAX;
+  cuda_opt.do_copy_in_default_stream = false;
+  cuda_opt.has_user_compute_stream = false;
+  cuda_opt.user_compute_stream = nullptr;
+  session_options.AppendExecutionProvider_CUDA(cuda_opt);
+#endif
+}
+
+void SetTrtProviders(Ort::SessionOptions &session_options) {
+#if ORT_API_VERSION <= 7
+  session_options.AppendExecutionProvider_TensorRT(
+      {/*tensorrt_options=*/0,
+       /*has_user_compute_stream=*/false,
+       /*user_compute_stream=*/nullptr});
+
+  std::unordered_map<std::string, std::string> cfgs;
+  cfgs["ORT_TENSORRT_MAX_PARTITION_ITERATIONS"] = "1000";
+  cfgs["ORT_TENSORRT_MIN_SUBGRAPH_SIZE"] = "1";
+  cfgs["ORT_TENSORRT_MAX_WORKSPACE_SIZE"] = "1073741824";
+  cfgs["ORT_TENSORRT_ENGINE_CACHE_ENABLE"] = FLAGS_cacheDir != "" ? "1" : "0";
+  cfgs["ORT_TENSORRT_CACHE_PATH"] = FLAGS_cacheDir;
+  cfgs["ORT_TENSORRT_FP16_ENABLE"] = FLAGS_precision == "fp16" ? "1" : "0";
+
+  cfgs["ORT_TENSORRT_FILTERED_OPS"] = "";
+
+  //   {"ORT_TENSORRT_INT8_ENABLE", "0"},
+  //   {"ORT_TENSORRT_INT8_CALIBRATION_TABLE_NAME", ""},
+  // };
+  SetEnvironmentVars(cfgs);
+
+#elif ORT_API_VERSION >= 13
+  OrtTensorRTProviderOptions trt_opt{};
+  trt_opt.device_id = 0;
+  trt_opt.has_user_compute_stream = false;
+  trt_opt.user_compute_stream = nullptr;
+  trt_opt.trt_max_partition_iterations = 1000;
+  trt_opt.trt_min_subgraph_size = 3;
+  trt_opt.trt_max_workspace_size = 1073741824;
+  trt_opt.trt_fp16_enable = FLAGS_precision == "fp16";
+  trt_opt.trt_int8_enable = FLAGS_precision == "int8";
+  trt_opt.trt_engine_cache_enable = FLAGS_cacheDir != "";
+  trt_opt.trt_engine_cache_path = FLAGS_cacheDir.c_str();
+  trt_opt.trt_dump_subgraphs = false;
+
+  trt_opt.trt_filter_ops = FLAGS_trtFilterOps.c_str();
+  trt_opt.trt_prefer_fp32_ops = FLAGS_trtPreferFp32Ops.c_str();
+  trt_opt.trt_prefer_fp32_nodes = FLAGS_trtPreferFp32Nodes.c_str();
+
+  // if (int8_enable) {
+  //     trt_opt.trt_int8_calibration_table_name =
+  //     int8_calibration_table_file.filename().c_str();
+  // }
+
+  session_options.AppendExecutionProvider_TensorRT(trt_opt);
+#endif
+}
+
+void SetCpuProviders(Ort::SessionOptions &session_options) {
+#if ORT_API_VERSION <= 7
+#elif ORT_API_VERSION >= 13
+#endif
+}
+
 class StopWatchTimer {
 public:
   StopWatchTimer()
@@ -280,75 +359,15 @@ void Run() {
   session_options.SetGraphOptimizationLevel(
       GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
-  const auto &api = Ort::GetApi();
-
   if (FLAGS_provider == "cpu") {
-#if ORT_API_VERSION <= 7
-#elif ORT_API_VERSION >= 13
-#endif
+    SetCpuProviders(session_options);
   } else if (FLAGS_provider == "cuda") {
-#if ORT_API_VERSION <= 7
-    session_options.AppendExecutionProvider_CUDA(
-        /*cuda_options=*/{0, OrtCudnnConvAlgoSearch::HEURISTIC,
-                          /*cuda_mem_limit=*/std::numeric_limits<size_t>::max(),
-                          /*arena_extend_strategy=*/0, // kNextPowerOfTwo
-                          /*do_copy_in_default_stream=*/false,
-                          /*has_user_compute_stream=*/false,
-                          /*user_compute_stream=*/nullptr});
-
-#elif ORT_API_VERSION >= 13
-    OrtCUDAProviderOptions cuda_opt;
-    cuda_opt.device_id = 0;
-    cuda_opt.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
-    cuda_opt.gpu_mem_limit = SIZE_MAX;
-    cuda_opt.do_copy_in_default_stream = false;
-    cuda_opt.has_user_compute_stream = false;
-    cuda_opt.user_compute_stream = nullptr;
-    session_options.AppendExecutionProvider_CUDA(cuda_opt);
-#endif
+    SetCudaProviders(session_options);
+    SetCpuProviders(session_options);
   } else if (FLAGS_provider == "trt") {
-#if ORT_API_VERSION <= 7
-    session_options.AppendExecutionProvider_TensorRT(
-        {/*tensorrt_options=*/0,
-         /*has_user_compute_stream=*/false,
-         /*user_compute_stream=*/nullptr});
-
-    std::unordered_map<std::string, std::string> cfgs;
-    cfgs["ORT_TENSORRT_MAX_PARTITION_ITERATIONS"] = "1000";
-    cfgs["ORT_TENSORRT_MIN_SUBGRAPH_SIZE"] = "1";
-    cfgs["ORT_TENSORRT_MAX_WORKSPACE_SIZE"] = "1073741824";
-    cfgs["ORT_TENSORRT_ENGINE_CACHE_ENABLE"] = FLAGS_cacheDir != "" ? "1" : "0";
-    cfgs["ORT_TENSORRT_CACHE_PATH"] = FLAGS_cacheDir;
-    cfgs["ORT_TENSORRT_FP16_ENABLE"] = FLAGS_precision == "fp16" ? "1" : "0";
-
-    cfgs["ORT_TENSORRT_FILTERED_OPS"] = "";
-
-    //   {"ORT_TENSORRT_INT8_ENABLE", "0"},
-    //   {"ORT_TENSORRT_INT8_CALIBRATION_TABLE_NAME", ""},
-    // };
-    SetEnvironmentVars(cfgs);
-
-#elif ORT_API_VERSION >= 13
-    OrtTensorRTProviderOptions trt_opt{};
-    trt_opt.device_id = 0;
-    trt_opt.has_user_compute_stream = false;
-    trt_opt.user_compute_stream = nullptr;
-    trt_opt.trt_max_partition_iterations = 1000;
-    trt_opt.trt_min_subgraph_size = 3;
-    trt_opt.trt_max_workspace_size = 1073741824;
-    trt_opt.trt_fp16_enable = FLAGS_precision == "fp16";
-    trt_opt.trt_int8_enable = FLAGS_precision == "int8";
-    trt_opt.trt_engine_cache_enable = FLAGS_cacheDir != "";
-    trt_opt.trt_engine_cache_path = FLAGS_cacheDir.c_str();
-    // trt_opt.trt_filter_ops = FLAGS_trtFilterOps.c_str();
-    trt_opt.trt_dump_subgraphs = false;
-    // if (int8_enable) {
-    //     trt_opt.trt_int8_calibration_table_name =
-    //     int8_calibration_table_file.filename().c_str();
-    // }
-
-    session_options.AppendExecutionProvider_TensorRT(trt_opt);
-#endif
+    SetTrtProviders(session_options);
+    SetCudaProviders(session_options);
+    SetCpuProviders(session_options);
   }
 
   auto session_start = std::chrono::high_resolution_clock::now();

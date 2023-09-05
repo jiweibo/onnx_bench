@@ -5,9 +5,10 @@ DIR="$(cd "$(dirname "$0")" ; pwd -P)"
 cd "$DIR"
 
 model=$1
-node_names=$2
-base_provider=${3:-cpu}
-ref_provider=${4:-trt}
+precision=$2
+node_names=$3
+base_provider=${4:-cpu}
+ref_provider=${5:-trt}
 
 if [ ! -f "$model" ]; then
     echo "$model not found."
@@ -21,10 +22,10 @@ ONNX_BENCH=./build/onnx_bench
 
 # prune model
 prune_model=$tmp_dir/pruned.onnx
-if [ -z "$node_name" ];then
+if [ -z "$node_names" ];then
     $PYTHON prune.py $model $prune_model
 else
-    $PYTHON prune.py $model $prune_model --output_nodes $node_names
+    $PYTHON prune.py $model $prune_model --output_nodes "$node_names"
 fi
 
 # run model to get output
@@ -38,7 +39,9 @@ ref_out=$tmp_dir/${ref_provider}_out.txt
 # export ORT_DEBUG_NODE_IO_DUMP_DATA_DESTINATION=stdout
 
 $ONNX_BENCH --onnx $prune_model --provider $base_provider --dumpOutput $base_out > cpu.txt
-$ONNX_BENCH --onnx $prune_model --provider $ref_provider --dumpOutput $ref_out > trt.txt
+$ONNX_BENCH --onnx $prune_model --provider $ref_provider --precision $precision --dumpOutput $ref_out > trt.txt
 
 # check precision
 $PYTHON check.py $base_out $ref_out
+
+rm -rf $tmp_dir

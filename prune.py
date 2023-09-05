@@ -6,59 +6,57 @@ def parse():
     parser = argparse.ArgumentParser()
     parser.add_argument("src", type=str, help="src onnx")
     parser.add_argument("dst", type=str, help="dst onnx")
-    parser.add_argument("--output_nodes", type=str, default=None, help="output node: a,b,c")
-    parser.add_argument("--input_nodes", type=str, default=None, help="input node: a,b,c")
+    parser.add_argument("--output_nodes", type=str, default=None, help="output node: a,b,c, default None")
+    parser.add_argument("--input_nodes", type=str, default=None, help="input node: a,b,c, default None")
+    parser.add_argument("--no_origin_in_nodes", action="store_false", help="add origin input nodes or not")
+    parser.add_argument("--origin_out_nodes", action="store_true", help="add origin output nodes or not, only useful when --prune")
+    parser.add_argument("--prune", action="store_true", help="prune model or just mark some tensors output node.")
     return parser.parse_args()
 
-def parse_onnx_inputs(filename):
-    model = onnx.load(filename)
+def get_origin_input_output_names(model):
     num = len(model.graph.input)
     input_names = []
     for i in range(num):
         input_names.append(model.graph.input[i].name)
-    return ",".join(input_names)
 
-def parse_onnx_outputs(filename):
-    model = onnx.load(filename)
     num = len(model.graph.output)
     output_names = []
     for i in range(num):
         output_names.append(model.graph.output[i].name)
 
-
-    # for binary.
-    # all_nodes = model.graph.node
-    # node_len = len(all_nodes)
-    # down_binary_names = all_nodes[int(node_len/2)].output
-
-    return ",".join(output_names)
+    return input_names, output_names
 
 
 if __name__ == "__main__":
     args = parse()
 
-    base_input_nodes = parse_onnx_inputs(args.src).split(",")
-    base_output_nodes = parse_onnx_outputs(args.src).split(",")
-    input_nodes = []
-    output_nodes = []
+    model = onnx.load(args.src)
+    ori_in_names, ori_out_names = get_origin_input_output_names(model)
+    real_input_names = []
+    real_output_names = []
 
-    skip_prune = True
     if args.input_nodes is not None:
-        input_nodes = args.input_nodes.split(",")
-        if input_nodes != base_input_nodes:
-            skip_prune = False
-    else:
-        input_nodes = base_input_nodes
+        real_input_names = args.input_nodes.split(",")
+    if args.no_origin_in_nodes:
+        real_input_names.extend(ori_in_names)
+    print("input_nodes: ", real_input_names)
 
     if args.output_nodes is not None:
-        output_nodes = args.output_nodes.split(",")
-        if output_nodes != base_output_nodes:
-            skip_prune = False
-        
-    print("input_nodes: ", input_nodes)
-    print("output_nodes: ", output_nodes)
-    
-    if skip_prune:
-        copyfile(args.src, args.dst)
+        real_output_names = args.output_nodes.split(",")
+
+
+    if args.prune:
+        if args.origin_out_nodes:
+            real_output_names.extend(ori_out_names)
+            print("output_nodes: ", real_output_names)
+
+        onnx.utils.extract_model(args.src, args.dst, real_input_names, real_output_names)
     else:
-        onnx.utils.extract_model(args.src, args.dst, input_nodes, output_nodes)
+        value_info_protos = []
+        print("output_nodes: ", real_output_names+ori_out_names)
+        for idx, node in enumerate(model.graph.value_info):
+            if node.name in real_output_names and node.name not in ori_out_names:
+                value_info_protos.append(node)
+        model.graph.output.extend(value_info_protos)
+        onnx.checker.check_model(model)
+        onnx.save(model, args.dst)
