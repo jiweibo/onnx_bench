@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.12)
 
 project(onnx_bench CXX)
 
-option(ORT_ROOTDIR, "onnxruntime root dir")
+option(ORT_DIR, "onnxruntime root dir")
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -16,10 +16,10 @@ link_directories("/usr/local/lib")
 include_directories("/usr/local/cuda/include")
 link_directories("/usr/local/cuda/lib64")
 
-include_directories("${ORT_ROOTDIR}/include")
-include_directories("${ORT_ROOTDIR}/include/onnxruntime")
-include_directories("${ORT_ROOTDIR}/include/onnxruntime/core/session")
-link_directories("${ORT_ROOTDIR}/lib")
+include_directories("${ORT_DIR}/include")
+include_directories("${ORT_DIR}/include/onnxruntime")
+include_directories("${ORT_DIR}/include/onnxruntime/core/session")
+link_directories("${ORT_DIR}/lib")
 
 set(DEPS glog gflags cudart)
 

@@ -22,6 +22,7 @@ def parse():
 
 def check(base, ref):
     assert base.shape == ref.shape, 'base.shape is %s but ref.shape is %s' % (str(base.shape), str(ref.shape))
+    print('shape is ', base.shape)
     diff = base - ref
     abs_diff = np.abs(diff)
     rerr = abs_diff / (base + 1e-9)

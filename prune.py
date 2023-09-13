@@ -48,8 +48,8 @@ if __name__ == "__main__":
     if args.prune:
         if args.origin_out_nodes:
             real_output_names.extend(ori_out_names)
-            print("output_nodes: ", real_output_names)
 
+        print("output_nodes: ", real_output_names)
         onnx.utils.extract_model(args.src, args.dst, real_input_names, real_output_names)
     else:
         value_info_protos = []

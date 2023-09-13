@@ -13,8 +13,8 @@ sudo apt install libgoogle-glog-dev
 - compile
 
 ```
-export ORT_ROOTDIR=../../onnxruntime/build/install/
-cmake .. -DORT_ROOTDIR=$ORT_ROOTDIR \
+export ORT_DIR=../../onnxruntime/build/install/
+cmake .. -DORT_DIR=$ORT_DIR \
          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 ```
 

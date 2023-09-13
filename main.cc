@@ -28,14 +28,16 @@ DEFINE_int32(batch, 1, "batch");
 DEFINE_int32(warmup, 0, "warmup");
 DEFINE_int32(repeats, 1, "repeats");
 DEFINE_string(precision, "fp32", "fp32, fp16, int8");
-DEFINE_string(provider, "cpu", "cpu, cuda, trt");
+DEFINE_string(provider, "cpu", "cpu, openvino, cuda, trt");
 DEFINE_string(cacheDir, "", "the cache dir");
 DEFINE_string(dumpOutput, "",
               "Print the output tensor(s) of the last inference iteration "
               "(default = disabled).");
 DEFINE_string(trtFilterOps, "", "defaule empty, e.g. 'Flatten_125 Flatten_126'");
-DEFINE_string(trtPreferFp32Ops, "", "prefer fp32 ops");
-DEFINE_string(trtPreferFp32Nodes, "", "prefer fp32 nodes");
+DEFINE_string(trtPreferPrecisionOps, "", "prefer fp32 ops");
+DEFINE_string(trtPreferPrecisionNodes, "", "prefer fp32 nodes");
+DEFINE_string(trtForcePrecisionOps, "", "force ops");
+DEFINE_string(trtForcePrecisionNodes, "", "force nodes");
 
 // TODO:
 DEFINE_string(
@@ -252,7 +254,7 @@ void SetTrtProviders(Ort::SessionOptions &session_options) {
   trt_opt.user_compute_stream = nullptr;
   trt_opt.trt_max_partition_iterations = 1000;
   trt_opt.trt_min_subgraph_size = 3;
-  trt_opt.trt_max_workspace_size = 1073741824;
+  trt_opt.trt_max_workspace_size = 1UL << 31;
   trt_opt.trt_fp16_enable = FLAGS_precision == "fp16";
   trt_opt.trt_int8_enable = FLAGS_precision == "int8";
   trt_opt.trt_engine_cache_enable = FLAGS_cacheDir != "";
@@ -260,8 +262,10 @@ void SetTrtProviders(Ort::SessionOptions &session_options) {
   trt_opt.trt_dump_subgraphs = false;
 
   trt_opt.trt_filter_ops = FLAGS_trtFilterOps.c_str();
-  trt_opt.trt_prefer_fp32_ops = FLAGS_trtPreferFp32Ops.c_str();
-  trt_opt.trt_prefer_fp32_nodes = FLAGS_trtPreferFp32Nodes.c_str();
+  trt_opt.trt_prefer_precision_ops = FLAGS_trtPreferPrecisionOps.c_str();
+  trt_opt.trt_prefer_precision_nodes = FLAGS_trtPreferPrecisionNodes.c_str();
+  trt_opt.trt_force_precision_ops = FLAGS_trtForcePrecisionOps.c_str();
+  trt_opt.trt_force_precision_nodes = FLAGS_trtForcePrecisionNodes.c_str();
 
   // if (int8_enable) {
   //     trt_opt.trt_int8_calibration_table_name =
@@ -276,6 +280,20 @@ void SetCpuProviders(Ort::SessionOptions &session_options) {
 #if ORT_API_VERSION <= 7
 #elif ORT_API_VERSION >= 13
 #endif
+}
+
+void SetOpenVINOProviders(Ort::SessionOptions& session_options) {
+  OrtOpenVINOProviderOptions options;
+  options.device_type = "CPU_FP32";
+  options.device_id = "";
+  options.num_of_threads = 8;
+  // options.cache_dir = "";
+  // options.context = 0x123456ff;
+  // options.enable_opencl_throttling = false;
+  session_options.AppendExecutionProvider_OpenVINO(options);
+  
+  // https://onnxruntime.ai/docs/execution-providers/OpenVINO-ExecutionProvider.html#onnxruntime-graph-level-optimization
+  session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_DISABLE_ALL);
 }
 
 class StopWatchTimer {
@@ -361,6 +379,8 @@ void Run() {
 
   if (FLAGS_provider == "cpu") {
     SetCpuProviders(session_options);
+  } else if (FLAGS_provider == "openvino") {
+    SetOpenVINOProviders(session_options);
   } else if (FLAGS_provider == "cuda") {
     SetCudaProviders(session_options);
     SetCpuProviders(session_options);

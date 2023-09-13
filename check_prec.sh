@@ -25,21 +25,15 @@ prune_model=$tmp_dir/pruned.onnx
 if [ -z "$node_names" ];then
     $PYTHON prune.py $model $prune_model
 else
-    $PYTHON prune.py $model $prune_model --output_nodes "$node_names"
+    $PYTHON prune.py $model $prune_model --output_nodes "$node_names" --prune
 fi
 
 # run model to get output
 base_out=$tmp_dir/${base_provider}_out.txt
 ref_out=$tmp_dir/${ref_provider}_out.txt
 
-# export ORT_DEBUG_NODE_IO_DUMP_SHAPE_DATA=1
-# export ORT_DEBUG_NODE_IO_DUMP_NODE_PLACEMENT=1
-# export ORT_DEBUG_NODE_IO_DUMP_INPUT_DATA=0
-# export ORT_DEBUG_NODE_IO_DUMP_OUTPUT_DATA=1
-# export ORT_DEBUG_NODE_IO_DUMP_DATA_DESTINATION=stdout
-
-$ONNX_BENCH --onnx $prune_model --provider $base_provider --dumpOutput $base_out > cpu.txt
-$ONNX_BENCH --onnx $prune_model --provider $ref_provider --precision $precision --dumpOutput $ref_out > trt.txt
+$ONNX_BENCH --onnx $prune_model --provider $base_provider --dumpOutput $base_out --batch 32
+$ONNX_BENCH --onnx $prune_model --provider $ref_provider --precision $precision --dumpOutput $ref_out --batch 32
 
 # check precision
 $PYTHON check.py $base_out $ref_out
