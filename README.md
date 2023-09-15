@@ -15,6 +15,7 @@ sudo apt install libgoogle-glog-dev
 ```
 export ORT_DIR=../../onnxruntime/build/install/
 cmake .. -DORT_DIR=$ORT_DIR \
+         -DJSONCPP_DIR=$JSONCPP_DIR \
          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 ```
 

@@ -1,9 +1,12 @@
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <functional>
+#include <iostream>
+#include <iterator>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -12,6 +15,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "dataset.h"
 #if ORT_API_VERSION >= 13
 #include "core/providers/tensorrt/tensorrt_provider_options.h"
 #endif
@@ -33,18 +37,21 @@ DEFINE_string(cacheDir, "", "the cache dir");
 DEFINE_string(dumpOutput, "",
               "Print the output tensor(s) of the last inference iteration "
               "(default = disabled).");
-DEFINE_string(trtFilterOps, "", "defaule empty, e.g. 'Flatten_125 Flatten_126'");
+DEFINE_string(trtFilterOps, "",
+              "defaule empty, e.g. 'Flatten_125 Flatten_126'");
 DEFINE_string(trtPreferPrecisionOps, "", "prefer fp32 ops");
 DEFINE_string(trtPreferPrecisionNodes, "", "prefer fp32 nodes");
 DEFINE_string(trtForcePrecisionOps, "", "force ops");
 DEFINE_string(trtForcePrecisionNodes, "", "force nodes");
 
 // TODO:
-DEFINE_string(
-    loadInputs, "",
-    "Load input values from files (default = generate random inputs). Input "
-    "names can be wrapped with single quotes (ex: 'Input:0.in')");
-DEFINE_string(inputType, "txt", "txt, bin etc.");
+// DEFINE_string(
+//     loadInputs, "",
+//     "Load input values from files (default = generate random inputs). Input "
+//     "names can be wrapped with single quotes (ex: 'Input:0.in')");
+// DEFINE_string(inputType, "json", "txt, bin, json etc.");
+
+DEFINE_string(dataDir, "", "a dir which stores lots of json file");
 
 std::default_random_engine e(1998);
 
@@ -282,7 +289,7 @@ void SetCpuProviders(Ort::SessionOptions &session_options) {
 #endif
 }
 
-void SetOpenVINOProviders(Ort::SessionOptions& session_options) {
+void SetOpenVINOProviders(Ort::SessionOptions &session_options) {
   OrtOpenVINOProviderOptions options;
   options.device_type = "CPU_FP32";
   options.device_id = "";
@@ -291,9 +298,10 @@ void SetOpenVINOProviders(Ort::SessionOptions& session_options) {
   // options.context = 0x123456ff;
   // options.enable_opencl_throttling = false;
   session_options.AppendExecutionProvider_OpenVINO(options);
-  
+
   // https://onnxruntime.ai/docs/execution-providers/OpenVINO-ExecutionProvider.html#onnxruntime-graph-level-optimization
-  session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_DISABLE_ALL);
+  session_options.SetGraphOptimizationLevel(
+      GraphOptimizationLevel::ORT_DISABLE_ALL);
 }
 
 class StopWatchTimer {
@@ -313,6 +321,7 @@ public:
   void Stop() {
     diff_time_ = GetDiffTime();
     total_time_ += diff_time_;
+    durations_.push_back(diff_time_);
     running_ = false;
     ++clock_sessions_;
   }
@@ -324,6 +333,7 @@ public:
     diff_time_ = 0;
     total_time_ = 0;
     clock_sessions_ = 0;
+    durations_.clear();
 
     if (running_) {
       start_time_ = std::chrono::high_resolution_clock::now();
@@ -349,6 +359,23 @@ public:
     return (clock_sessions_ > 0) ? (total_time_ / clock_sessions_) : 0.0;
   }
 
+  double ComputeVariance() {
+    double mean = std::accumulate(durations_.begin(), durations_.end(), 0.0) /
+                  durations_.size();
+    double sqDiffSum = 0.0;
+    for (auto duration : durations_) {
+      sqDiffSum += (duration - mean) * (duration - mean);
+    }
+    return sqDiffSum / (durations_.size() - 1);
+  }
+
+  double ComputePercentile(double top) {
+    std::sort(durations_.begin(), durations_.end());
+    return durations_[(int)(durations_.size() * top)];
+  }
+
+  std::vector<double> GetDurations() { return durations_; }
+
 private:
   inline double GetDiffTime() {
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -366,12 +393,12 @@ private:
   double diff_time_;
 
   double total_time_;
+
+  std::vector<double> durations_;
 };
 } // namespace
 
-void Run() {
-  Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "infer_demo");
-
+Ort::Session InitSession(Ort::Env &env) {
   Ort::SessionOptions session_options;
   session_options.SetIntraOpNumThreads(1);
   session_options.SetGraphOptimizationLevel(
@@ -398,6 +425,10 @@ void Run() {
           .count();
   LOG(INFO) << "Init session time is " << dur << ", ms";
 
+  return session;
+}
+
+void Run(Ort::Session &session) {
   Ort::AllocatorWithDefaultOptions allocator;
 
   // Print number of model input nodes
@@ -519,10 +550,151 @@ void Run() {
   }
 }
 
+void RunDataSet(Ort::Session &session) {
+  Ort::AllocatorWithDefaultOptions allocator;
+  const size_t num_input_nodes = session.GetInputCount();
+
+  std::vector<std::string> input_names;
+  std::vector<const char *> input_names_char;
+  std::vector<Ort::Value> input_tensors;
+
+  input_names.reserve(num_input_nodes);
+  input_tensors.reserve(num_input_nodes);
+  for (int i = 0; i < num_input_nodes; ++i) {
+    input_tensors.push_back(Ort::Value{nullptr});
+  }
+
+  // Iterator over all input nodes
+  for (size_t i = 0; i < num_input_nodes; ++i) {
+    input_names.push_back(session.GetInputNameAllocated(i, allocator).get());
+    input_names_char.push_back(input_names[i].c_str());
+  }
+
+  const size_t num_output_nodes = session.GetOutputCount();
+  std::vector<std::string> output_names;
+  std::vector<const char *> output_names_char;
+
+  StopWatchTimer timer;
+  std::vector<float> max_abs_diff(num_output_nodes, 0);
+  std::vector<float> max_abs_diff_base(num_output_nodes, 0);
+  std::vector<float> max_abs_diff_ref(num_output_nodes, 0);
+
+  output_names.reserve(num_output_nodes);
+  output_names_char.reserve(num_output_nodes);
+
+  for (size_t i = 0; i < num_output_nodes; ++i) {
+    output_names.push_back(session.GetOutputNameAllocated(i, allocator).get());
+    output_names_char.push_back(output_names.back().c_str());
+  }
+
+  JsonDataSet ds(FLAGS_dataDir, 5);
+  auto names = input_names;
+  names.insert(names.end(), output_names.begin(), output_names.end());
+  while (1) {
+    auto map = ds.GetData(names, FLAGS_batch, true);
+    if (map.empty())
+      break;
+    // LOG(INFO) << "Process for batch " << FLAGS_batch;
+    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(
+        OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU);
+    for (size_t i = 0; i < input_names.size(); ++i) {
+      auto name = input_names[i];
+      auto dtype = std::get<2>(map[name]);
+      auto shape = std::get<1>(map[name]);
+      void *data = std::get<0>(map[name]);
+      shape[0] = FLAGS_batch;
+      size_t num = std::accumulate(shape.begin(), shape.end(), 1,
+                                   std::multiplies<int>());
+
+      Ort::Value tensor{nullptr};
+      if (dtype == Dtype::FLOAT32) {
+        tensor = Ort::Value::CreateTensor<float>(
+            mem_info, static_cast<float *>(data), num, shape.data(),
+            shape.size());
+      } else if (dtype == Dtype::BOOL) {
+        tensor =
+            Ort::Value::CreateTensor<bool>(mem_info, static_cast<bool *>(data),
+                                           num, shape.data(), shape.size());
+      } else {
+        LOG(FATAL) << "not support dtype " << static_cast<int>(dtype);
+      }
+      input_tensors[i] = std::move(tensor);
+    }
+
+    timer.Start();
+    auto output_tensors = session.Run(
+        Ort::RunOptions{nullptr}, input_names_char.data(), input_tensors.data(),
+        num_input_nodes, output_names_char.data(), num_output_nodes);
+    cudaDeviceSynchronize();
+    timer.Stop();
+
+    for (size_t i = 0; i < output_names.size(); ++i) {
+      auto name = output_names[i];
+      auto out_shape = output_tensors[i].GetTensorTypeAndShapeInfo().GetShape();
+      size_t num = std::accumulate(out_shape.begin(), out_shape.end(), 1,
+                                   std::multiplies<int>());
+      auto dtype = std::get<2>(map[name]);
+      // auto shape = std::get<1>(map[name]);
+      void *data = std::get<0>(map[name]);
+
+      // CHECK_EQ(out_shape.size(), shape.size());
+
+      // not check precion for int.
+      if (dtype == Dtype::FLOAT32) {
+        auto *out_data = output_tensors[i].GetTensorData<float>();
+        for (size_t j = 0; j < num; ++j) {
+          auto diff = abs(out_data[j] - (static_cast<float *>(data))[j]);
+          if (diff > max_abs_diff[i]) {
+            max_abs_diff[i] = diff;
+            max_abs_diff_base[i] = static_cast<float *>(data)[j];
+            max_abs_diff_ref[i] = out_data[j];
+          }
+        }
+      } else if (dtype == Dtype::BOOL) {
+        auto *out_data = output_tensors[i].GetTensorData<bool>();
+        for (size_t j = 0; j < num; ++j) {
+          auto diff = abs(out_data[j] - static_cast<bool *>(data)[j]);
+          if (diff > max_abs_diff[i]) {
+            max_abs_diff[i] = diff;
+            max_abs_diff_base[i] = static_cast<bool *>(data)[j];
+            max_abs_diff_ref[i] = out_data[j];
+          }
+        }
+      } else if (dtype == Dtype::INT32) {
+        // LOG(INFO) << "ignore check for int type.";
+      } else if (dtype == Dtype::INT64) {
+        // LOG(INFO) << "ignore check for int64 type.";
+      } else {
+        LOG(FATAL) << "not supported dtype " << static_cast<int>(dtype);
+      }
+    }
+  }
+
+  for (size_t i = 0; i < max_abs_diff.size(); ++i) {
+    LOG(INFO) << "max_abs_diff: " << max_abs_diff[i] << ", base is "
+              << max_abs_diff_base[i] << ", ref is " << max_abs_diff_ref[i];
+  }
+  LOG(INFO) << "Average time " << timer.GetAverageTime()
+            << ", variance: " << timer.ComputeVariance()
+            << ", tp99: " << timer.ComputePercentile(0.99);
+
+  // for (auto dur : timer.GetDurations()) {
+  //   LOG(INFO) << dur;
+  // }
+}
+
 int main(int argc, char **argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   if (FLAGS_onnx == "") {
     LOG(FATAL) << "Please set --onnx flag.";
   }
-  Run();
+
+  Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "infer_demo");
+  auto session = InitSession(env);
+
+  Run(session);
+
+  if (FLAGS_dataDir != "") {
+    RunDataSet(session);
+  }
 }
