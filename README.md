@@ -5,8 +5,7 @@ onnx benchmark and tools
 - install deps
 
 ```
-sudo apt install libgflags-dev
-sudo apt install libgoogle-glog-dev
+sudo apt install libgoogle-glog-dev libgflags-dev
 ```
 
 

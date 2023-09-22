@@ -55,39 +55,46 @@ DEFINE_string(dataDir, "", "a dir which stores lots of json file");
 
 std::default_random_engine e(1998);
 
-const char *SEP = "-SEP-";
+const char* SEP = "-SEP-";
 
 namespace {
 void SetEnvironmentVars(
-    const std::unordered_map<std::string, std::string> &env_vars) {
-  for (const auto &env_var : env_vars) {
+    const std::unordered_map<std::string, std::string>& env_vars) {
+  for (const auto& env_var : env_vars) {
     CHECK(setenv(env_var.first.c_str(), env_var.second.c_str(), 1) == 0)
         << "Set env failed " << env_var.first << ":" << env_var.second;
   }
 }
 
-void *GenerateData(const std::vector<int64_t> &dims,
+void* GenerateData(const std::vector<int64_t>& dims,
                    ONNXTensorElementDataType type) {
   size_t num =
       std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
 
   if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    float *ptr = static_cast<float *>(malloc(num * sizeof(float)));
+    float* ptr = static_cast<float*>(malloc(num * sizeof(float)));
     std::uniform_real_distribution<float> u(-1, 1);
     for (size_t i = 0; i < num; ++i) {
       ptr[i] = u(e);
     }
     return ptr;
   } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-    int *ptr = static_cast<int *>(malloc(num * sizeof(int)));
+    int* ptr = static_cast<int*>(malloc(num * sizeof(int)));
     std::uniform_int_distribution<int> u(-128, 127);
     for (size_t i = 0; i < num; ++i) {
       ptr[i] = u(e);
     }
     return ptr;
   } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
-    bool *ptr = static_cast<bool *>(malloc(num * sizeof(bool)));
+    bool* ptr = static_cast<bool*>(malloc(num * sizeof(bool)));
     std::uniform_int_distribution<int> u(0, 1);
+    for (size_t i = 0; i < num; ++i) {
+      ptr[i] = u(e);
+    }
+    return ptr;
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) {
+    auto* ptr = static_cast<uint8_t*>(malloc(num * sizeof(uint8_t)));
+    std::uniform_int_distribution<uint8_t> u(0, 255);
     for (size_t i = 0; i < num; ++i) {
       ptr[i] = u(e);
     }
@@ -99,30 +106,54 @@ void *GenerateData(const std::vector<int64_t> &dims,
   return nullptr;
 }
 
-Ort::Value InitTensorFromData(void *data, const std::vector<int64_t> &dims,
+size_t SizeOf(ONNXTensorElementDataType dtype) {
+  switch (dtype) {
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:  // maps to c type float
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:  // maps to c type int32_t
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32: // maps to c type uint32_t
+    return 4;
+
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+    return 1;
+
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: // maps to c type uint16_t
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:  // maps to c type int16_t
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16: // Non-IEEE floating-point format
+                                               // based on IEEE754
+                                               // single-precision
+    return 2;
+
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:     // maps to c type int64_t
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:    // maps to c type double
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX64: // complex with float32 real and
+                                                // imaginary components
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:    // maps to c type uint64_t
+    return 8;
+
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX128: // complex with float64 real
+                                                 // and imaginary components
+    return 16;
+  default:
+    LOG(FATAL) << "Not supported dtype " << dtype;
+  }
+}
+
+Ort::Value InitTensorFromData(void* data, const std::vector<int64_t>& dims,
                               ONNXTensorElementDataType type) {
   Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(
       OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU);
 
   size_t num =
       std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
-  Ort::Value tensor{nullptr};
-  if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    tensor = Ort::Value::CreateTensor<float>(
-        mem_info, static_cast<float *>(data), num, dims.data(), dims.size());
-  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-    tensor = Ort::Value::CreateTensor<int32_t>(
-        mem_info, static_cast<int32_t *>(data), num, dims.data(), dims.size());
-  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
-    tensor = Ort::Value::CreateTensor<bool>(mem_info, static_cast<bool *>(data),
-                                            num, dims.data(), dims.size());
-  } else {
-    LOG(FATAL) << "Not supported data type " << type;
-  }
+  Ort::Value tensor = Ort::Value::CreateTensor(
+      mem_info, data, num * SizeOf(type), dims.data(), dims.size(), type);
   return tensor;
 }
 
-template <typename T> std::string PrintShape(const std::vector<T> &v) {
+template <typename T> std::string PrintShape(const std::vector<T>& v) {
   std::stringstream ss;
   for (size_t i = 0; i < v.size() - 1; ++i) {
     ss << v[i] << "x";
@@ -131,7 +162,7 @@ template <typename T> std::string PrintShape(const std::vector<T> &v) {
   return ss.str();
 }
 
-template <typename T> float mean(T *data, size_t n) {
+template <typename T> float mean(T* data, size_t n) {
   float sum = 0;
   for (size_t i = 0; i < n; ++i) {
     sum += data[i];
@@ -139,65 +170,69 @@ template <typename T> float mean(T *data, size_t n) {
   return sum * 1. / n;
 }
 
-float MeanValue(const Ort::Value &tensor) {
+float MeanValue(const Ort::Value& tensor) {
   auto type_info = tensor.GetTensorTypeAndShapeInfo();
   auto type = type_info.GetElementType();
   auto dims = type_info.GetShape();
   size_t num =
       std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
   if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    auto *data = tensor.GetTensorData<float>();
+    auto* data = tensor.GetTensorData<float>();
     return mean(data, num);
   } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-    auto *data = tensor.GetTensorData<int>();
+    auto* data = tensor.GetTensorData<int>();
     return mean(data, num);
   } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-    auto *data = tensor.GetTensorData<int64_t>();
+    auto* data = tensor.GetTensorData<int64_t>();
     return mean(data, num);
   } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
-    auto *data = tensor.GetTensorData<bool>();
+    auto* data = tensor.GetTensorData<bool>();
     return mean(data, num);
   } else {
     LOG(FATAL) << "Not supported data type " << type;
   }
 }
 
-void DumpTensors(const std::vector<Ort::Value> &tensors,
-                 const std::vector<std::string> &names,
-                 const std::string &filename) {
+void DumpTensors(const std::vector<Ort::Value>& tensors,
+                 const std::vector<std::string>& names,
+                 const std::string& filename) {
   CHECK_EQ(tensors.size(), names.size());
   std::ofstream out(filename);
   for (size_t i = 0; i < tensors.size(); ++i) {
-    auto &tensor = tensors[i];
-    auto &name = names[i];
+    auto& tensor = tensors[i];
+    auto& name = names[i];
     out << name << SEP;
     auto type_info = tensor.GetTensorTypeAndShapeInfo();
     auto type = type_info.GetElementType();
     auto dims = type_info.GetShape();
     size_t num =
         std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
+    if (num == 0) {
+      out << "\n";
+      continue;
+    }
 
     if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-      auto *data = tensor.GetTensorData<float>();
+      auto* data = tensor.GetTensorData<float>();
       for (size_t i = 0; i < num - 1; ++i) {
         out << data[i] << " ";
       }
       out << data[num - 1];
       // return mean(data, num);
     } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-      auto *data = tensor.GetTensorData<int>();
+      auto* data = tensor.GetTensorData<int>();
       for (size_t i = 0; i < num - 1; ++i) {
         out << data[i] << " ";
       }
       out << data[num - 1];
     } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-      auto *data = tensor.GetTensorData<int64_t>();
+      auto* data = tensor.GetTensorData<int64_t>();
       for (size_t i = 0; i < num - 1; ++i) {
         out << data[i] << " ";
       }
       out << data[num - 1];
     } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
-      auto *data = tensor.GetTensorData<bool>();
+      auto* data = tensor.GetTensorData<bool>();
       for (size_t i = 0; i < num - 1; ++i) {
         out << data[i] << " ";
       }
@@ -210,7 +245,7 @@ void DumpTensors(const std::vector<Ort::Value> &tensors,
   out.close();
 }
 
-void SetCudaProviders(Ort::SessionOptions &session_options) {
+void SetCudaProviders(Ort::SessionOptions& session_options) {
 #if ORT_API_VERSION <= 7
   session_options.AppendExecutionProvider_CUDA(
       /*cuda_options=*/{0, OrtCudnnConvAlgoSearch::HEURISTIC,
@@ -232,7 +267,7 @@ void SetCudaProviders(Ort::SessionOptions &session_options) {
 #endif
 }
 
-void SetTrtProviders(Ort::SessionOptions &session_options) {
+void SetTrtProviders(Ort::SessionOptions& session_options) {
 #if ORT_API_VERSION <= 7
   session_options.AppendExecutionProvider_TensorRT(
       {/*tensorrt_options=*/0,
@@ -283,13 +318,13 @@ void SetTrtProviders(Ort::SessionOptions &session_options) {
 #endif
 }
 
-void SetCpuProviders(Ort::SessionOptions &session_options) {
+void SetCpuProviders(Ort::SessionOptions& session_options) {
 #if ORT_API_VERSION <= 7
 #elif ORT_API_VERSION >= 13
 #endif
 }
 
-void SetOpenVINOProviders(Ort::SessionOptions &session_options) {
+void SetOpenVINOProviders(Ort::SessionOptions& session_options) {
   OrtOpenVINOProviderOptions options;
   options.device_type = "CPU_FP32";
   options.device_id = "";
@@ -398,7 +433,7 @@ private:
 };
 } // namespace
 
-Ort::Session InitSession(Ort::Env &env) {
+Ort::Session InitSession(Ort::Env& env) {
   Ort::SessionOptions session_options;
   session_options.SetIntraOpNumThreads(1);
   session_options.SetGraphOptimizationLevel(
@@ -428,17 +463,17 @@ Ort::Session InitSession(Ort::Env &env) {
   return session;
 }
 
-void Run(Ort::Session &session) {
+void Run(Ort::Session& session) {
   Ort::AllocatorWithDefaultOptions allocator;
 
   // Print number of model input nodes
   const size_t num_input_nodes = session.GetInputCount();
 
   std::vector<std::string> input_names;
-  std::vector<const char *> input_names_char;
+  std::vector<const char*> input_names_char;
   std::vector<std::vector<int64_t>> input_node_dims;
   std::vector<Ort::Value> input_tensors;
-  std::vector<void *> ptr_to_free;
+  std::vector<void*> ptr_to_free;
 
   input_names.reserve(num_input_nodes);
   input_node_dims.reserve(num_input_nodes);
@@ -471,7 +506,7 @@ void Run(Ort::Session &session) {
       input_node_dims[i][0] = FLAGS_batch;
     }
 
-    auto *data = GenerateData(input_node_dims[i], type);
+    auto* data = GenerateData(input_node_dims[i], type);
     ptr_to_free.push_back(data);
     input_tensors.emplace_back(
         InitTensorFromData(data, input_node_dims[i], type));
@@ -483,7 +518,7 @@ void Run(Ort::Session &session) {
   }
 
   std::vector<std::string> output_names;
-  std::vector<const char *> output_names_char;
+  std::vector<const char*> output_names_char;
   std::vector<std::vector<int64_t>> output_node_dims;
 
   const size_t num_output_nodes = session.GetOutputCount();
@@ -550,12 +585,12 @@ void Run(Ort::Session &session) {
   }
 }
 
-void RunDataSet(Ort::Session &session) {
+void RunDataSet(Ort::Session& session) {
   Ort::AllocatorWithDefaultOptions allocator;
   const size_t num_input_nodes = session.GetInputCount();
 
   std::vector<std::string> input_names;
-  std::vector<const char *> input_names_char;
+  std::vector<const char*> input_names_char;
   std::vector<Ort::Value> input_tensors;
 
   input_names.reserve(num_input_nodes);
@@ -572,7 +607,7 @@ void RunDataSet(Ort::Session &session) {
 
   const size_t num_output_nodes = session.GetOutputCount();
   std::vector<std::string> output_names;
-  std::vector<const char *> output_names_char;
+  std::vector<const char*> output_names_char;
 
   StopWatchTimer timer;
   std::vector<float> max_abs_diff(num_output_nodes, 0);
@@ -601,19 +636,19 @@ void RunDataSet(Ort::Session &session) {
       auto name = input_names[i];
       auto dtype = std::get<2>(map[name]);
       auto shape = std::get<1>(map[name]);
-      void *data = std::get<0>(map[name]);
+      void* data = std::get<0>(map[name]);
       shape[0] = FLAGS_batch;
       size_t num = std::accumulate(shape.begin(), shape.end(), 1,
                                    std::multiplies<int>());
 
       Ort::Value tensor{nullptr};
       if (dtype == Dtype::FLOAT32) {
-        tensor = Ort::Value::CreateTensor<float>(
-            mem_info, static_cast<float *>(data), num, shape.data(),
-            shape.size());
+        tensor =
+            Ort::Value::CreateTensor<float>(mem_info, static_cast<float*>(data),
+                                            num, shape.data(), shape.size());
       } else if (dtype == Dtype::BOOL) {
         tensor =
-            Ort::Value::CreateTensor<bool>(mem_info, static_cast<bool *>(data),
+            Ort::Value::CreateTensor<bool>(mem_info, static_cast<bool*>(data),
                                            num, shape.data(), shape.size());
       } else {
         LOG(FATAL) << "not support dtype " << static_cast<int>(dtype);
@@ -635,28 +670,28 @@ void RunDataSet(Ort::Session &session) {
                                    std::multiplies<int>());
       auto dtype = std::get<2>(map[name]);
       // auto shape = std::get<1>(map[name]);
-      void *data = std::get<0>(map[name]);
+      void* data = std::get<0>(map[name]);
 
       // CHECK_EQ(out_shape.size(), shape.size());
 
       // not check precion for int.
       if (dtype == Dtype::FLOAT32) {
-        auto *out_data = output_tensors[i].GetTensorData<float>();
+        auto* out_data = output_tensors[i].GetTensorData<float>();
         for (size_t j = 0; j < num; ++j) {
-          auto diff = abs(out_data[j] - (static_cast<float *>(data))[j]);
+          auto diff = abs(out_data[j] - (static_cast<float*>(data))[j]);
           if (diff > max_abs_diff[i]) {
             max_abs_diff[i] = diff;
-            max_abs_diff_base[i] = static_cast<float *>(data)[j];
+            max_abs_diff_base[i] = static_cast<float*>(data)[j];
             max_abs_diff_ref[i] = out_data[j];
           }
         }
       } else if (dtype == Dtype::BOOL) {
-        auto *out_data = output_tensors[i].GetTensorData<bool>();
+        auto* out_data = output_tensors[i].GetTensorData<bool>();
         for (size_t j = 0; j < num; ++j) {
-          auto diff = abs(out_data[j] - static_cast<bool *>(data)[j]);
+          auto diff = abs(out_data[j] - static_cast<bool*>(data)[j]);
           if (diff > max_abs_diff[i]) {
             max_abs_diff[i] = diff;
-            max_abs_diff_base[i] = static_cast<bool *>(data)[j];
+            max_abs_diff_base[i] = static_cast<bool*>(data)[j];
             max_abs_diff_ref[i] = out_data[j];
           }
         }
@@ -683,7 +718,7 @@ void RunDataSet(Ort::Session &session) {
   // }
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   if (FLAGS_onnx == "") {
     LOG(FATAL) << "Please set --onnx flag.";
