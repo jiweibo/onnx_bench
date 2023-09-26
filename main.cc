@@ -16,16 +16,17 @@
 #include <unordered_map>
 
 #include "dataset.h"
-#if ORT_API_VERSION >= 13
 #include "core/providers/tensorrt/tensorrt_provider_options.h"
-#endif
 #include "onnxruntime_c_api.h"
 #include "onnxruntime_cxx_api.h"
+
+// #include "onnxruntime/core/framework/
 
 #include <cuda_runtime.h>
 
 #include <gflags/gflags.h>
 #include <glog/logging.h>
+#include <nvToolsExt.h>
 
 DEFINE_string(onnx, "", "onnx model file");
 DEFINE_int32(batch, 1, "batch");
@@ -58,13 +59,29 @@ std::default_random_engine e(1998);
 const char* SEP = "-SEP-";
 
 namespace {
-void SetEnvironmentVars(
-    const std::unordered_map<std::string, std::string>& env_vars) {
-  for (const auto& env_var : env_vars) {
-    CHECK(setenv(env_var.first.c_str(), env_var.second.c_str(), 1) == 0)
-        << "Set env failed " << env_var.first << ":" << env_var.second;
+
+class NvtxRange {
+public:
+  NvtxRange(const std::string& message) : message_(message) {}
+
+  void Begin() {
+    nvtxEventAttributes_t eventAttrib;
+    eventAttrib.version = NVTX_VERSION;
+    eventAttrib.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    eventAttrib.colorType = NVTX_COLOR_ARGB;
+    eventAttrib.color = 0x00ccffcc;
+    eventAttrib.messageType = NVTX_MESSAGE_TYPE_ASCII;
+    eventAttrib.message.ascii = message_.c_str();
+
+    range_id_ = nvtxRangeStartEx(&eventAttrib);
   }
-}
+
+  void End() { nvtxRangeEnd(range_id_); }
+
+private:
+  uint64_t range_id_;
+  const std::string message_;
+};
 
 void* GenerateData(const std::vector<int64_t>& dims,
                    ONNXTensorElementDataType type) {
@@ -145,6 +162,9 @@ Ort::Value InitTensorFromData(void* data, const std::vector<int64_t>& dims,
                               ONNXTensorElementDataType type) {
   Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(
       OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU);
+
+  // Ort::MemoryInfo output_mem_info{"Cuda", OrtDeviceAllocator, 0,
+  //                                 OrtMemTypeDefault};
 
   size_t num =
       std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
@@ -246,16 +266,6 @@ void DumpTensors(const std::vector<Ort::Value>& tensors,
 }
 
 void SetCudaProviders(Ort::SessionOptions& session_options) {
-#if ORT_API_VERSION <= 7
-  session_options.AppendExecutionProvider_CUDA(
-      /*cuda_options=*/{0, OrtCudnnConvAlgoSearch::HEURISTIC,
-                        /*cuda_mem_limit=*/std::numeric_limits<size_t>::max(),
-                        /*arena_extend_strategy=*/0, // kNextPowerOfTwo
-                        /*do_copy_in_default_stream=*/false,
-                        /*has_user_compute_stream=*/false,
-                        /*user_compute_stream=*/nullptr});
-
-#elif ORT_API_VERSION >= 13
   OrtCUDAProviderOptions cuda_opt;
   cuda_opt.device_id = 0;
   cuda_opt.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
@@ -264,32 +274,9 @@ void SetCudaProviders(Ort::SessionOptions& session_options) {
   cuda_opt.has_user_compute_stream = false;
   cuda_opt.user_compute_stream = nullptr;
   session_options.AppendExecutionProvider_CUDA(cuda_opt);
-#endif
 }
 
 void SetTrtProviders(Ort::SessionOptions& session_options) {
-#if ORT_API_VERSION <= 7
-  session_options.AppendExecutionProvider_TensorRT(
-      {/*tensorrt_options=*/0,
-       /*has_user_compute_stream=*/false,
-       /*user_compute_stream=*/nullptr});
-
-  std::unordered_map<std::string, std::string> cfgs;
-  cfgs["ORT_TENSORRT_MAX_PARTITION_ITERATIONS"] = "1000";
-  cfgs["ORT_TENSORRT_MIN_SUBGRAPH_SIZE"] = "1";
-  cfgs["ORT_TENSORRT_MAX_WORKSPACE_SIZE"] = "1073741824";
-  cfgs["ORT_TENSORRT_ENGINE_CACHE_ENABLE"] = FLAGS_cacheDir != "" ? "1" : "0";
-  cfgs["ORT_TENSORRT_CACHE_PATH"] = FLAGS_cacheDir;
-  cfgs["ORT_TENSORRT_FP16_ENABLE"] = FLAGS_precision == "fp16" ? "1" : "0";
-
-  cfgs["ORT_TENSORRT_FILTERED_OPS"] = "";
-
-  //   {"ORT_TENSORRT_INT8_ENABLE", "0"},
-  //   {"ORT_TENSORRT_INT8_CALIBRATION_TABLE_NAME", ""},
-  // };
-  SetEnvironmentVars(cfgs);
-
-#elif ORT_API_VERSION >= 13
   OrtTensorRTProviderOptions trt_opt{};
   trt_opt.device_id = 0;
   trt_opt.has_user_compute_stream = false;
@@ -315,7 +302,6 @@ void SetTrtProviders(Ort::SessionOptions& session_options) {
   // }
 
   session_options.AppendExecutionProvider_TensorRT(trt_opt);
-#endif
 }
 
 void SetCpuProviders(Ort::SessionOptions& session_options) {
@@ -465,82 +451,47 @@ Ort::Session InitSession(Ort::Env& env) {
 
 void Run(Ort::Session& session) {
   Ort::AllocatorWithDefaultOptions allocator;
+  NvtxRange nvtx_run("run");
+  NvtxRange nvtx_h2d("h2d");
+  NvtxRange nvtx_d2h("d2h");
+
+  // Ort::MemoryInfo mem_info{"Cuda", OrtDeviceAllocator, 0,
+  //                               OrtMemTypeDefault};
+  auto mem_info = Ort::MemoryInfo::CreateCpu(
+      OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU);
 
   // Print number of model input nodes
   const size_t num_input_nodes = session.GetInputCount();
-
-  std::vector<std::string> input_names;
-  std::vector<const char*> input_names_char;
-  std::vector<std::vector<int64_t>> input_node_dims;
-  std::vector<Ort::Value> input_tensors;
-  std::vector<void*> ptr_to_free;
-
-  input_names.reserve(num_input_nodes);
-  input_node_dims.reserve(num_input_nodes);
-  input_tensors.reserve(num_input_nodes);
-  ptr_to_free.reserve(num_input_nodes);
-
-  LOG(INFO) << "Number of inputs " << num_input_nodes;
-
-  // Iterator over all input nodes
+  const size_t num_output_nodes = session.GetOutputCount();
+  std::vector<std::string> input_names(num_input_nodes);
+  std::vector<std::string> output_names(num_output_nodes);
+  std::vector<std::vector<int64_t>> input_node_dims(num_input_nodes);
+  std::vector<std::vector<int64_t>> output_node_dims(num_output_nodes);
   for (size_t i = 0; i < num_input_nodes; ++i) {
-    // print input node names
-#if ORT_API_VERSION <= 7
-    input_names.push_back(session.GetInputName(i, allocator));
-#elif ORT_API_VERSION >= 13
-    input_names.push_back(session.GetInputNameAllocated(i, allocator).get());
-#endif
-    input_names_char.push_back(input_names[i].c_str());
-
-    // print input node types
+    input_names[i] = session.GetInputNameAllocated(i, allocator).get();
     auto type_info = session.GetInputTypeInfo(i);
     auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+    input_node_dims[i] = tensor_info.GetShape();
 
-    ONNXTensorElementDataType type = tensor_info.GetElementType();
-
-    // Print input shapes/dims
-    input_node_dims.push_back(tensor_info.GetShape());
-
-    // TODO(wilber): process for `batch`
     if (input_node_dims[i][0] == -1) {
       input_node_dims[i][0] = FLAGS_batch;
     }
 
-    auto* data = GenerateData(input_node_dims[i], type);
-    ptr_to_free.push_back(data);
-    input_tensors.emplace_back(
-        InitTensorFromData(data, input_node_dims[i], type));
-
     LOG(INFO) << "Input " << i << " : name = " << input_names[i]
-              << ", type = " << type
+              << ", type = " << tensor_info.GetElementType()
               << ", num_dims = " << input_node_dims[i].size()
               << ", dims = " << PrintShape(input_node_dims[i]);
   }
-
-  std::vector<std::string> output_names;
-  std::vector<const char*> output_names_char;
-  std::vector<std::vector<int64_t>> output_node_dims;
-
-  const size_t num_output_nodes = session.GetOutputCount();
-
-  output_names.reserve(num_output_nodes);
-  output_names_char.reserve(num_output_nodes);
-  output_node_dims.reserve(num_output_nodes);
-
-  LOG(INFO) << "Number of outputs " << num_output_nodes;
-
   for (size_t i = 0; i < num_output_nodes; ++i) {
-#if ORT_API_VERSION <= 7
-    output_names.push_back(session.GetOutputName(i, allocator));
-#elif ORT_API_VERSION >= 13
-    output_names.push_back(session.GetOutputNameAllocated(i, allocator).get());
-#endif
-    output_names_char.push_back(output_names.back().c_str());
+    output_names[i] = session.GetOutputNameAllocated(i, allocator).get();
 
     auto type_info = session.GetOutputTypeInfo(i);
     auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
-    output_node_dims.push_back(
-        type_info.GetTensorTypeAndShapeInfo().GetShape());
+    output_node_dims[i] = type_info.GetTensorTypeAndShapeInfo().GetShape();
+
+    if (output_node_dims[i][0] == -1) {
+      output_node_dims[i][0] = FLAGS_batch;
+    }
 
     LOG(INFO) << "Output " << i << " : name = " << output_names[i]
               << ", type = " << tensor_info.GetElementType()
@@ -548,26 +499,58 @@ void Run(Ort::Session& session) {
               << ", dims = " << PrintShape(output_node_dims[i]);
   }
 
-  auto start = std::chrono::high_resolution_clock::now();
-  for (size_t i = 0; i < FLAGS_warmup; ++i) {
-    auto output_tensors = session.Run(
-        Ort::RunOptions{nullptr}, input_names_char.data(), input_tensors.data(),
-        num_input_nodes, output_names_char.data(), num_output_nodes);
-  }
-  cudaDeviceSynchronize();
-  auto end = std::chrono::high_resolution_clock::now();
-  auto time = std::chrono::duration<double, std::milli>(end - start).count();
-  LOG(INFO) << "warmup done, time is " << time << " ms.";
+  Ort::IoBinding bind(session);
+  std::vector<void*> ptr_to_free;
+  StopWatchTimer timer_run;
+  // StopWatchTimer timer_h2d;
 
-  StopWatchTimer timer;
+  auto RunPerBatch = [&]() {
+    bind.ClearBoundInputs();
+    bind.ClearBoundOutputs();
+
+    for (size_t i = 0; i < num_input_nodes; ++i) {
+      auto type = session.GetInputTypeInfo(i)
+                      .GetTensorTypeAndShapeInfo()
+                      .GetElementType();
+      auto* data = GenerateData(input_node_dims[i], type);
+      ptr_to_free.push_back(data);
+      auto tensor = InitTensorFromData(data, input_node_dims[i], type);
+      nvtx_h2d.Begin();
+      // timer_h2d.Start();
+      bind.BindInput(input_names[i].c_str(), tensor);
+      // bind.SynchronizeInputs();
+      // timer_h2d.Stop();
+      nvtx_h2d.End();
+    }
+
+    for (size_t i = 0; i < num_output_nodes; ++i) {
+      bind.BindOutput(output_names[i].c_str(), mem_info);
+    }
+
+    nvtx_run.Begin();
+    timer_run.Start();
+    session.Run(Ort::RunOptions{}, bind);
+    timer_run.Stop();
+    nvtx_run.End();
+
+    bind.SynchronizeOutputs();
+
+    for (auto v : ptr_to_free) {
+      free(v);
+    }
+    ptr_to_free.clear();
+
+    return bind.GetOutputValues();
+  };
+
+  for (size_t i = 0; i < FLAGS_warmup; ++i) {
+    RunPerBatch();
+  }
+  timer_run.Reset();
+  // timer_h2d.Reset();
 
   for (size_t i = 0; i < FLAGS_repeats; ++i) {
-    timer.Start();
-    auto output_tensors = session.Run(
-        Ort::RunOptions{nullptr}, input_names_char.data(), input_tensors.data(),
-        num_input_nodes, output_names_char.data(), num_output_nodes);
-    cudaDeviceSynchronize();
-    timer.Stop();
+    auto output_tensors = RunPerBatch();
 
     if (i == FLAGS_repeats - 1) {
       for (size_t j = 0; j < output_tensors.size(); ++j) {
@@ -578,11 +561,10 @@ void Run(Ort::Session& session) {
         DumpTensors(output_tensors, output_names, FLAGS_dumpOutput);
     }
   }
-  LOG(INFO) << "Average cost time: " << timer.GetAverageTime() << " ms.";
 
-  for (auto v : ptr_to_free) {
-    free(v);
-  }
+  LOG(INFO) << "Average time " << timer_run.GetAverageTime()
+            << ", variance: " << timer_run.ComputeVariance()
+            << ", tp99: " << timer_run.ComputePercentile(0.99);
 }
 
 void RunDataSet(Ort::Session& session) {
