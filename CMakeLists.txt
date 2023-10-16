@@ -26,7 +26,7 @@ link_directories("${ORT_DIR}/lib")
 include_directories("${JSONCPP_DIR}/include")
 link_directories("${JSONCPP_DIR}/lib")
 
-set(DEPS glog gflags cudart)
+set(DEPS glog gflags cudart nvToolsExt)
 
 add_executable(onnx_bench main.cc)
 target_link_libraries(onnx_bench onnxruntime)

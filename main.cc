@@ -20,8 +20,6 @@
 #include "onnxruntime_c_api.h"
 #include "onnxruntime_cxx_api.h"
 
-// #include "onnxruntime/core/framework/
-
 #include <cuda_runtime.h>
 
 #include <gflags/gflags.h>
@@ -44,6 +42,8 @@ DEFINE_string(trtPreferPrecisionOps, "", "prefer fp32 ops");
 DEFINE_string(trtPreferPrecisionNodes, "", "prefer fp32 nodes");
 DEFINE_string(trtForcePrecisionOps, "", "force ops");
 DEFINE_string(trtForcePrecisionNodes, "", "force nodes");
+
+DEFINE_double(sparse, 0, "input sparsity");
 
 // TODO:
 // DEFINE_string(
@@ -162,15 +162,41 @@ Ort::Value InitTensorFromData(void* data, const std::vector<int64_t>& dims,
                               ONNXTensorElementDataType type) {
   Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(
       OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU);
-
-  // Ort::MemoryInfo output_mem_info{"Cuda", OrtDeviceAllocator, 0,
+  // Ort::MemoryInfo cuda_mem_info{"Cuda", OrtDeviceAllocator, 0,
   //                                 OrtMemTypeDefault};
+  // Ort::MemoryInfo info("Cpu", OrtDeviceAllocator, 0, OrtMemTypeDefault);
 
   size_t num =
       std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
-  Ort::Value tensor = Ort::Value::CreateTensor(
-      mem_info, data, num * SizeOf(type), dims.data(), dims.size(), type);
-  return tensor;
+  if (std::abs(FLAGS_sparse - 0.f) < 1e-10) {
+    Ort::Value tensor = Ort::Value::CreateTensor(
+        mem_info, data, num * SizeOf(type), dims.data(), dims.size(), type);
+    return tensor;
+  } else {
+    size_t values_num = size_t(num * FLAGS_sparse);
+    void* values_ptr = data;
+    std::vector<int64_t> values_shape{static_cast<int64_t>(values_num)};
+    int64_t indices_num = values_num * 2;
+    std::vector<int64_t> indices_shape{indices_num};
+
+    int64_t* indices_ptr =
+        static_cast<int64_t*>(malloc(indices_num * sizeof(int64_t)));
+    int min_dims = INT_MAX;
+    for (auto d : dims) {
+      min_dims = d < min_dims ? d : min_dims;
+    }
+    std::uniform_int_distribution<int> u(0, min_dims);
+    for (size_t i = 0; i < indices_num; ++i) {
+      indices_ptr[i] = u(e);
+    }
+
+    Ort::Value::Shape ort_dense_shape{dims.data(), dims.size()};
+    Ort::Value::Shape ort_values_shape{&values_shape[0], 1U};
+    auto coo_st = Ort::Value::CreateSparseTensor(
+        mem_info, values_ptr, ort_dense_shape, ort_values_shape, type);
+    coo_st.UseCooIndices(indices_ptr, indices_num);
+    return coo_st;
+  }
 }
 
 template <typename T> std::string PrintShape(const std::vector<T>& v) {
@@ -207,6 +233,9 @@ float MeanValue(const Ort::Value& tensor) {
     return mean(data, num);
   } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
     auto* data = tensor.GetTensorData<bool>();
+    return mean(data, num);
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) {
+    auto* data = tensor.GetTensorData<uint8_t>();
     return mean(data, num);
   } else {
     LOG(FATAL) << "Not supported data type " << type;
@@ -257,6 +286,12 @@ void DumpTensors(const std::vector<Ort::Value>& tensors,
         out << data[i] << " ";
       }
       out << data[num - 1];
+    } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) {
+      auto* data = tensor.GetTensorData<uint8_t>();
+      for (size_t i = 0; i < num - 1; ++i) {
+        out << data[i] << " ";
+      }
+      out << data[num - 1];
     } else {
       LOG(FATAL) << "Not supported data type " << type;
     }
@@ -291,10 +326,10 @@ void SetTrtProviders(Ort::SessionOptions& session_options) {
   trt_opt.trt_dump_subgraphs = false;
 
   trt_opt.trt_filter_ops = FLAGS_trtFilterOps.c_str();
-  trt_opt.trt_prefer_precision_ops = FLAGS_trtPreferPrecisionOps.c_str();
-  trt_opt.trt_prefer_precision_nodes = FLAGS_trtPreferPrecisionNodes.c_str();
-  trt_opt.trt_force_precision_ops = FLAGS_trtForcePrecisionOps.c_str();
-  trt_opt.trt_force_precision_nodes = FLAGS_trtForcePrecisionNodes.c_str();
+  // trt_opt.trt_prefer_precision_ops = FLAGS_trtPreferPrecisionOps.c_str();
+  // trt_opt.trt_prefer_precision_nodes = FLAGS_trtPreferPrecisionNodes.c_str();
+  // trt_opt.trt_force_precision_ops = FLAGS_trtForcePrecisionOps.c_str();
+  // trt_opt.trt_force_precision_nodes = FLAGS_trtForcePrecisionNodes.c_str();
 
   // if (int8_enable) {
   //     trt_opt.trt_int8_calibration_table_name =
@@ -455,8 +490,8 @@ void Run(Ort::Session& session) {
   NvtxRange nvtx_h2d("h2d");
   NvtxRange nvtx_d2h("d2h");
 
-  // Ort::MemoryInfo mem_info{"Cuda", OrtDeviceAllocator, 0,
-  //                               OrtMemTypeDefault};
+  Ort::MemoryInfo cuda_mem_info{"Cuda", OrtDeviceAllocator, 0,
+                                OrtMemTypeDefault};
   auto mem_info = Ort::MemoryInfo::CreateCpu(
       OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU);
 
@@ -554,11 +589,24 @@ void Run(Ort::Session& session) {
 
     if (i == FLAGS_repeats - 1) {
       for (size_t j = 0; j < output_tensors.size(); ++j) {
-        LOG(INFO) << "Mean value " << j << " : "
-                  << MeanValue(output_tensors[j]);
+        auto& out = output_tensors[j];
+        if (out.IsSparseTensor()) {
+          // auto format = out.GetSparseFormat();
+          auto ind_type_shape = out.GetSparseTensorIndicesTypeShapeInfo(
+              OrtSparseIndicesFormat::ORT_SPARSE_COO_INDICES);
+          auto val_type_shape = out.GetSparseTensorValuesTypeAndShapeInfo();
+          LOG(INFO) << PrintShape(ind_type_shape.GetShape());
+          LOG(INFO) << PrintShape(val_type_shape.GetShape());
+        } else {
+          LOG(INFO) << "Mean value " << j << " : "
+                    << MeanValue(output_tensors[j]);
+        }
       }
-      if (FLAGS_dumpOutput != "")
-        DumpTensors(output_tensors, output_names, FLAGS_dumpOutput);
+      if (FLAGS_dumpOutput != "") {
+        if (std::abs(FLAGS_sparse - 0.f) < 1e-10) {
+          DumpTensors(output_tensors, output_names, FLAGS_dumpOutput);
+        }
+      }
     }
   }
 
@@ -706,7 +754,7 @@ int main(int argc, char** argv) {
     LOG(FATAL) << "Please set --onnx flag.";
   }
 
-  Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "infer_demo");
+  Ort::Env env(ORT_LOGGING_LEVEL_INFO, "infer_demo");
   auto session = InitSession(env);
 
   Run(session);
