@@ -7,7 +7,7 @@ cd "$DIR"
 model=$1
 precision=$2
 node_names=$3
-base_provider=${4:-cpu}
+base_provider=${4:-cuda}
 ref_provider=${5:-trt}
 
 if [ ! -f "$model" ]; then
@@ -29,8 +29,8 @@ else
 fi
 
 # run model to get output
-base_out=$tmp_dir/${base_provider}_out.txt
-ref_out=$tmp_dir/${ref_provider}_out.txt
+base_out=$tmp_dir/${base_provider}_out.npz
+ref_out=$tmp_dir/${ref_provider}_out.npz
 
 $ONNX_BENCH --onnx $prune_model --provider $base_provider --dumpOutput $base_out --batch 32
 $ONNX_BENCH --onnx $prune_model --provider $ref_provider --precision $precision --dumpOutput $ref_out --batch 32

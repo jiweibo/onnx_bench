@@ -5,7 +5,7 @@ onnx benchmark and tools
 - install deps
 
 ```
-sudo apt install libgoogle-glog-dev libgflags-dev
+git submodule update --init
 ```
 
 
@@ -14,7 +14,6 @@ sudo apt install libgoogle-glog-dev libgflags-dev
 ```
 export ORT_DIR=../../onnxruntime/build/install/
 cmake .. -DORT_DIR=$ORT_DIR \
-         -DJSONCPP_DIR=$JSONCPP_DIR \
          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 ```
 

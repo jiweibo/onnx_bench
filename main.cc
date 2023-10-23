@@ -14,17 +14,22 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "dataset.h"
-#include "core/providers/tensorrt/tensorrt_provider_options.h"
-#include "onnxruntime_c_api.h"
-#include "onnxruntime_cxx_api.h"
 
+#include "onnxruntime/core/providers/tensorrt/tensorrt_provider_options.h"
+#include "onnxruntime/core/session/onnxruntime_c_api.h"
+#include "onnxruntime/core/session/onnxruntime_cxx_api.h"
+
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
-
-#include <gflags/gflags.h>
-#include <glog/logging.h>
 #include <nvToolsExt.h>
+
+#include "gflags/gflags.h"
+#include "glog/logging.h"
+
+#include "cnpy.h"
 
 DEFINE_string(onnx, "", "onnx model file");
 DEFINE_int32(batch, 1, "batch");
@@ -33,17 +38,16 @@ DEFINE_int32(repeats, 1, "repeats");
 DEFINE_string(precision, "fp32", "fp32, fp16, int8");
 DEFINE_string(provider, "cpu", "cpu, openvino, cuda, trt");
 DEFINE_string(cacheDir, "", "the cache dir");
-DEFINE_string(dumpOutput, "",
-              "Print the output tensor(s) of the last inference iteration "
-              "(default = disabled).");
+DEFINE_string(
+    dumpOutput, "",
+    "Save the output tensor(s) of the last inference iteration in a npz file"
+    "(default = disabled).");
 DEFINE_string(trtFilterOps, "",
               "defaule empty, e.g. 'Flatten_125 Flatten_126'");
 DEFINE_string(trtPreferPrecisionOps, "", "prefer fp32 ops");
 DEFINE_string(trtPreferPrecisionNodes, "", "prefer fp32 nodes");
 DEFINE_string(trtForcePrecisionOps, "", "force ops");
 DEFINE_string(trtForcePrecisionNodes, "", "force nodes");
-
-DEFINE_double(sparse, 0, "input sparsity");
 
 // TODO:
 // DEFINE_string(
@@ -59,6 +63,15 @@ std::default_random_engine e(1998);
 const char* SEP = "-SEP-";
 
 namespace {
+
+template <typename T> std::string PrintShape(const std::vector<T>& v) {
+  std::stringstream ss;
+  for (size_t i = 0; i < v.size() - 1; ++i) {
+    ss << v[i] << "x";
+  }
+  ss << v.back();
+  return ss.str();
+}
 
 class NvtxRange {
 public:
@@ -85,14 +98,20 @@ private:
 
 void* GenerateData(const std::vector<int64_t>& dims,
                    ONNXTensorElementDataType type) {
-  size_t num =
-      std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
-
+  int64_t num =
+      std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int64_t>());
   if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     float* ptr = static_cast<float*>(malloc(num * sizeof(float)));
     std::uniform_real_distribution<float> u(-1, 1);
     for (size_t i = 0; i < num; ++i) {
       ptr[i] = u(e);
+    }
+    return ptr;
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    half* ptr = static_cast<half*>(malloc(num * sizeof(half)));
+    std::uniform_real_distribution<float> u(-1, 1);
+    for (size_t i = 0; i < num; ++i) {
+      ptr[i] = __half2float(u(e));
     }
     return ptr;
   } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
@@ -164,48 +183,11 @@ Ort::Value InitTensorFromData(void* data, const std::vector<int64_t>& dims,
       OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU);
   // Ort::MemoryInfo cuda_mem_info{"Cuda", OrtDeviceAllocator, 0,
   //                                 OrtMemTypeDefault};
-  // Ort::MemoryInfo info("Cpu", OrtDeviceAllocator, 0, OrtMemTypeDefault);
-
   size_t num =
       std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
-  if (std::abs(FLAGS_sparse - 0.f) < 1e-10) {
-    Ort::Value tensor = Ort::Value::CreateTensor(
-        mem_info, data, num * SizeOf(type), dims.data(), dims.size(), type);
-    return tensor;
-  } else {
-    size_t values_num = size_t(num * FLAGS_sparse);
-    void* values_ptr = data;
-    std::vector<int64_t> values_shape{static_cast<int64_t>(values_num)};
-    int64_t indices_num = values_num * 2;
-    std::vector<int64_t> indices_shape{indices_num};
-
-    int64_t* indices_ptr =
-        static_cast<int64_t*>(malloc(indices_num * sizeof(int64_t)));
-    int min_dims = INT_MAX;
-    for (auto d : dims) {
-      min_dims = d < min_dims ? d : min_dims;
-    }
-    std::uniform_int_distribution<int> u(0, min_dims);
-    for (size_t i = 0; i < indices_num; ++i) {
-      indices_ptr[i] = u(e);
-    }
-
-    Ort::Value::Shape ort_dense_shape{dims.data(), dims.size()};
-    Ort::Value::Shape ort_values_shape{&values_shape[0], 1U};
-    auto coo_st = Ort::Value::CreateSparseTensor(
-        mem_info, values_ptr, ort_dense_shape, ort_values_shape, type);
-    coo_st.UseCooIndices(indices_ptr, indices_num);
-    return coo_st;
-  }
-}
-
-template <typename T> std::string PrintShape(const std::vector<T>& v) {
-  std::stringstream ss;
-  for (size_t i = 0; i < v.size() - 1; ++i) {
-    ss << v[i] << "x";
-  }
-  ss << v.back();
-  return ss.str();
+  Ort::Value tensor = Ort::Value::CreateTensor(
+      mem_info, data, num * SizeOf(type), dims.data(), dims.size(), type);
+  return tensor;
 }
 
 template <typename T> float mean(T* data, size_t n) {
@@ -214,6 +196,27 @@ template <typename T> float mean(T* data, size_t n) {
     sum += data[i];
   }
   return sum * 1. / n;
+}
+
+const void* GetOrtDataPtr(const Ort::Value& tensor) {
+  auto type = tensor.GetTensorTypeAndShapeInfo().GetElementType();
+  const void* data{nullptr};
+  if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    data = tensor.GetTensorData<float>();
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    data = tensor.GetTensorData<__half>();
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+    data = tensor.GetTensorData<int>();
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+    data = tensor.GetTensorData<int64_t>();
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
+    data = tensor.GetTensorData<bool>();
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) {
+    data = tensor.GetTensorData<uint8_t>();
+  } else {
+    LOG(FATAL) << "Not supported data type " << type;
+  }
+  return data;
 }
 
 float MeanValue(const Ort::Value& tensor) {
@@ -246,58 +249,41 @@ void DumpTensors(const std::vector<Ort::Value>& tensors,
                  const std::vector<std::string>& names,
                  const std::string& filename) {
   CHECK_EQ(tensors.size(), names.size());
-  std::ofstream out(filename);
   for (size_t i = 0; i < tensors.size(); ++i) {
     auto& tensor = tensors[i];
     auto& name = names[i];
-    out << name << SEP;
     auto type_info = tensor.GetTensorTypeAndShapeInfo();
     auto type = type_info.GetElementType();
     auto dims = type_info.GetShape();
     size_t num =
         std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
     if (num == 0) {
-      out << "\n";
       continue;
     }
+    std::vector<size_t> shape(dims.begin(), dims.end());
 
     if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
       auto* data = tensor.GetTensorData<float>();
-      for (size_t i = 0; i < num - 1; ++i) {
-        out << data[i] << " ";
-      }
-      out << data[num - 1];
-      // return mean(data, num);
+      cnpy::npz_save(filename, name, data, shape, "a");
+    } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      auto* data = tensor.GetTensorData<__half>();
+      cnpy::npz_save(filename, name, data, shape, "a");
     } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
       auto* data = tensor.GetTensorData<int>();
-      for (size_t i = 0; i < num - 1; ++i) {
-        out << data[i] << " ";
-      }
-      out << data[num - 1];
+      cnpy::npz_save(filename, name, data, shape, "a");
     } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
       auto* data = tensor.GetTensorData<int64_t>();
-      for (size_t i = 0; i < num - 1; ++i) {
-        out << data[i] << " ";
-      }
-      out << data[num - 1];
+      cnpy::npz_save(filename, name, data, shape, "a");
     } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
       auto* data = tensor.GetTensorData<bool>();
-      for (size_t i = 0; i < num - 1; ++i) {
-        out << data[i] << " ";
-      }
-      out << data[num - 1];
+      cnpy::npz_save(filename, name, data, shape, "a");
     } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) {
       auto* data = tensor.GetTensorData<uint8_t>();
-      for (size_t i = 0; i < num - 1; ++i) {
-        out << data[i] << " ";
-      }
-      out << data[num - 1];
+      cnpy::npz_save(filename, name, data, shape, "a");
     } else {
       LOG(FATAL) << "Not supported data type " << type;
     }
-    out << "\n";
   }
-  out.close();
 }
 
 void SetCudaProviders(Ort::SessionOptions& session_options) {
@@ -339,11 +325,7 @@ void SetTrtProviders(Ort::SessionOptions& session_options) {
   session_options.AppendExecutionProvider_TensorRT(trt_opt);
 }
 
-void SetCpuProviders(Ort::SessionOptions& session_options) {
-#if ORT_API_VERSION <= 7
-#elif ORT_API_VERSION >= 13
-#endif
-}
+void SetCpuProviders(Ort::SessionOptions& session_options) {}
 
 void SetOpenVINOProviders(Ort::SessionOptions& session_options) {
   OrtOpenVINOProviderOptions options;
@@ -537,7 +519,7 @@ void Run(Ort::Session& session) {
   Ort::IoBinding bind(session);
   std::vector<void*> ptr_to_free;
   StopWatchTimer timer_run;
-  // StopWatchTimer timer_h2d;
+  StopWatchTimer timer_h2d;
 
   auto RunPerBatch = [&]() {
     bind.ClearBoundInputs();
@@ -551,10 +533,10 @@ void Run(Ort::Session& session) {
       ptr_to_free.push_back(data);
       auto tensor = InitTensorFromData(data, input_node_dims[i], type);
       nvtx_h2d.Begin();
-      // timer_h2d.Start();
+      timer_h2d.Start();
       bind.BindInput(input_names[i].c_str(), tensor);
-      // bind.SynchronizeInputs();
-      // timer_h2d.Stop();
+      bind.SynchronizeInputs();
+      timer_h2d.Stop();
       nvtx_h2d.End();
     }
 
@@ -590,27 +572,21 @@ void Run(Ort::Session& session) {
     if (i == FLAGS_repeats - 1) {
       for (size_t j = 0; j < output_tensors.size(); ++j) {
         auto& out = output_tensors[j];
-        if (out.IsSparseTensor()) {
-          // auto format = out.GetSparseFormat();
-          auto ind_type_shape = out.GetSparseTensorIndicesTypeShapeInfo(
-              OrtSparseIndicesFormat::ORT_SPARSE_COO_INDICES);
-          auto val_type_shape = out.GetSparseTensorValuesTypeAndShapeInfo();
-          LOG(INFO) << PrintShape(ind_type_shape.GetShape());
-          LOG(INFO) << PrintShape(val_type_shape.GetShape());
-        } else {
+        if (out.IsTensor()) {
           LOG(INFO) << "Mean value " << j << " : "
                     << MeanValue(output_tensors[j]);
         }
       }
       if (FLAGS_dumpOutput != "") {
-        if (std::abs(FLAGS_sparse - 0.f) < 1e-10) {
-          DumpTensors(output_tensors, output_names, FLAGS_dumpOutput);
-        }
+        DumpTensors(output_tensors, output_names, FLAGS_dumpOutput);
       }
     }
   }
 
-  LOG(INFO) << "Average time " << timer_run.GetAverageTime()
+  LOG(INFO) << "H2D Average time " << timer_h2d.GetAverageTime()
+            << ", variance: " << timer_h2d.ComputeVariance()
+            << ", tp99: " << timer_h2d.ComputePercentile(0.99);
+  LOG(INFO) << "Run+D2H Average time " << timer_run.GetAverageTime()
             << ", variance: " << timer_run.ComputeVariance()
             << ", tp99: " << timer_run.ComputePercentile(0.99);
 }
@@ -754,7 +730,7 @@ int main(int argc, char** argv) {
     LOG(FATAL) << "Please set --onnx flag.";
   }
 
-  Ort::Env env(ORT_LOGGING_LEVEL_INFO, "infer_demo");
+  Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "infer_demo");
   auto session = InitSession(env);
 
   Run(session);

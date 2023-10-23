@@ -2,16 +2,10 @@ import numpy as np
 import argparse
 
 def read_data(filename):
-    sep = "-SEP-"
+    data = np.load(filename)
     dic = {}
-    with open(filename, 'r') as f:
-        line = f.readline().strip()
-        while line:
-            info = line.split(sep)
-            name = info[0]
-            data = np.fromstring(info[1], sep=' ')
-            dic[name] = data
-            line = f.readline().strip()
+    for name in data.files:
+        dic[name] = data[name]
     return dic
 
 def parse():
@@ -21,11 +15,14 @@ def parse():
     return parser.parse_args()
 
 def check(base, ref):
-    # assert base.shape == ref.shape, 'base.shape is %s but ref.shape is %s' % (str(base.shape), str(ref.shape))
     if base.shape != ref.shape:
         print('base.shape is %s but ref.shape is %s' % (str(base.shape), str(ref.shape)))
         return -1
     print('shape is ', base.shape)
+    if base.size == 0:
+        return
+    base = base.flatten()
+    ref = ref.flatten()
     diff = base - ref
     abs_diff = np.abs(diff)
     rerr = abs_diff / (base + 1e-9)
