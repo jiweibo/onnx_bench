@@ -21,14 +21,17 @@ def check(base, ref):
     print('shape is ', base.shape)
     if base.size == 0:
         return
+    if base.dtype == np.bool:
+        base = base.astype(np.int32)
+        ref = ref.astype(np.int32)
     base = base.flatten()
     ref = ref.flatten()
     diff = base - ref
     abs_diff = np.abs(diff)
     rerr = abs_diff / (base + 1e-9)
 
-    print('avg abs_diff: %f ' % np.mean(abs_diff))
-    print('avg relative_diff: %f ' % np.mean(rerr))
+    print('- avg abs_diff: {0:.6f}%'.format(np.mean(abs_diff) * 100))
+    print('- avg relative_diff: {0:.6f}%'.format(np.mean(rerr) * 100))
 
     idx = np.argmax(abs_diff)
     print("max_diff: %f (base val is %f, ref val is %f)" % (abs_diff[idx], base[idx], ref[idx]))
@@ -36,15 +39,15 @@ def check(base, ref):
     k = min(10, abs_diff.size)
     top_k_idx = np.argsort(abs_diff)[::-1][:k]
     print("top_k max_diff (k = %d):" % k)
-    print("base val is %s" % str(base[top_k_idx]))
-    print("ref val is %s" % str(ref[top_k_idx]))
+    print("  base val is %s" % str(base[top_k_idx]))
+    print("  ref val is %s" % str(ref[top_k_idx]))
 
     ridx = np.argmax(rerr)
     print("max_relative_diff: %f (base val is %f, ref val is %f)" % (rerr[ridx], base[ridx], ref[ridx]))
     top_k_idx = np.argsort(rerr)[::-1][:k]
     print("top_k relative_diff (k = %d)" % k)
-    print("base val is %s" % str(base[top_k_idx]))
-    print("ref val is %s" % str(ref[top_k_idx]))
+    print("  base val is %s" % str(base[top_k_idx]))
+    print("  ref val is %s" % str(ref[top_k_idx]))
 
 
 if __name__ == '__main__':
