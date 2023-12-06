@@ -35,9 +35,12 @@ DEFINE_string(onnx, "", "onnx model file");
 DEFINE_int32(batch, 1, "batch");
 DEFINE_int32(warmup, 0, "warmup");
 DEFINE_int32(repeats, 1, "repeats");
-DEFINE_string(precision, "fp32", "fp32, fp16, int8");
+DEFINE_string(precision, "fp32", "fp32, fp16");
+DEFINE_bool(precisionInt8, false, "enable int8");
 DEFINE_string(provider, "cpu", "cpu, openvino, cuda, trt");
 DEFINE_string(cacheDir, "", "the cache dir");
+DEFINE_string(calibrationName, "", "int8 calibration table");
+DEFINE_int32(minSubgraphSize, 1, "trt min subgraph size");
 DEFINE_string(
     dumpOutput, "",
     "Save the output tensor(s) of the last inference iteration in a npz file"
@@ -116,6 +119,13 @@ void* GenerateData(const std::vector<int64_t>& dims,
     return ptr;
   } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
     int* ptr = static_cast<int*>(malloc(num * sizeof(int)));
+    std::uniform_int_distribution<int> u(-128, 127);
+    for (size_t i = 0; i < num; ++i) {
+      ptr[i] = u(e);
+    }
+    return ptr;
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+    auto* ptr = static_cast<int64_t*>(malloc(num * sizeof(int64_t)));
     std::uniform_int_distribution<int> u(-128, 127);
     for (size_t i = 0; i < num; ++i) {
       ptr[i] = u(e);
@@ -303,12 +313,13 @@ void SetTrtProviders(Ort::SessionOptions& session_options) {
   trt_opt.has_user_compute_stream = false;
   trt_opt.user_compute_stream = nullptr;
   trt_opt.trt_max_partition_iterations = 1000;
-  trt_opt.trt_min_subgraph_size = 3;
+  trt_opt.trt_min_subgraph_size = FLAGS_minSubgraphSize;
   trt_opt.trt_max_workspace_size = 1UL << 31;
   trt_opt.trt_fp16_enable = FLAGS_precision == "fp16";
-  trt_opt.trt_int8_enable = FLAGS_precision == "int8";
+  trt_opt.trt_int8_enable = FLAGS_precisionInt8;
   trt_opt.trt_engine_cache_enable = FLAGS_cacheDir != "";
   trt_opt.trt_engine_cache_path = FLAGS_cacheDir.c_str();
+  trt_opt.trt_int8_calibration_table_name = trt_opt.trt_int8_enable ? FLAGS_calibrationName.c_str() : "";
   trt_opt.trt_dump_subgraphs = false;
 
   trt_opt.trt_filter_ops = FLAGS_trtFilterOps.c_str();
