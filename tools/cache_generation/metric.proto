@@ -1,0 +1,57 @@
+syntax = "proto3";
+package pb;
+
+message Tensor {
+  enum DataType {
+    kFloat = 0;
+    kHalf = 1;
+    kInt8 = 2;
+    kInt32 = 3;
+    kUInt8 = 4;
+    kBool = 5;
+    kInt64 = 6;
+  }
+
+  DataType data_type = 1;
+  repeated int64 dim_sizes = 2;
+  bytes tensor_content = 3;
+}
+
+enum GraphOptimizationLevel {
+  DISABLE_ALL = 0;
+  ENABLE_BASIC = 1;
+  ENABLE_EXTENDED = 2;
+  ENABLE_ALL = 99;
+}
+
+message InferenceMetrics {
+  message Value {
+    float gpu_memory_in_mb = 1;
+    float time_in_millisecond = 2;
+    string check_report = 3;
+  }
+
+  // The key of |inputs| and |outputs| is the name of tensor.
+  map<string, Tensor> inputs = 1;
+  map<string, Tensor> outputs = 2;
+
+  // The key of |value| is the type of inference engine, such as "onnx-cpu",
+  // "onnx-gpu", "onnx-trt".
+  map<string, Value> value = 3;
+}
+
+message GraphMetrics {
+  int64 persistent_memory_size = 1;
+  int64 activation_memory_size = 2;
+  bool memory_can_reuse = 3;
+  float time_in_millisecond = 4;
+}
+
+message OnnxruntimeMetrics {
+  GraphOptimizationLevel graph_opt_level = 1;
+  string trt_filtered_ops = 2;
+  int64 trt_min_subgraph_size = 3;
+  repeated InferenceMetrics metrics = 4;
+  int64 max_activation_memory_size = 5;
+  map<string, GraphMetrics> subgraphs = 6;
+}

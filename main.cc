@@ -63,8 +63,6 @@ DEFINE_string(dataDir, "", "a dir which stores lots of json file");
 
 std::default_random_engine e(1998);
 
-const char* SEP = "-SEP-";
-
 namespace {
 
 template <typename T> std::string PrintShape(const std::vector<T>& v) {
@@ -319,7 +317,8 @@ void SetTrtProviders(Ort::SessionOptions& session_options) {
   trt_opt.trt_int8_enable = FLAGS_precisionInt8;
   trt_opt.trt_engine_cache_enable = FLAGS_cacheDir != "";
   trt_opt.trt_engine_cache_path = FLAGS_cacheDir.c_str();
-  trt_opt.trt_int8_calibration_table_name = trt_opt.trt_int8_enable ? FLAGS_calibrationName.c_str() : "";
+  trt_opt.trt_int8_calibration_table_name =
+      trt_opt.trt_int8_enable ? FLAGS_calibrationName.c_str() : "";
   trt_opt.trt_dump_subgraphs = false;
 
   trt_opt.trt_filter_ops = FLAGS_trtFilterOps.c_str();

@@ -37,3 +37,4 @@ build/
 compile_commands.json
 
 __pychache__/
+*_pb2.py
