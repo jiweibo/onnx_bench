@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "dataset.h"
+#include "memuse.h"
 
 #include "onnxruntime/core/providers/tensorrt/tensorrt_provider_options.h"
 #include "onnxruntime/core/session/onnxruntime_c_api.h"
@@ -599,6 +600,7 @@ void Run(Ort::Session& session) {
   LOG(INFO) << "Run+D2H Average time " << timer_run.GetAverageTime()
             << ", variance: " << timer_run.ComputeVariance()
             << ", tp99: " << timer_run.ComputePercentile(0.99);
+  LOG(INFO) << "H2D+RUN+D2H time " << timer_h2d.GetAverageTime() + timer_run.GetAverageTime();
 }
 
 void RunDataSet(Ort::Session& session) {
@@ -743,7 +745,14 @@ int main(int argc, char** argv) {
   Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "infer_demo");
   auto session = InitSession(env);
 
+  MemoryUse memuse;
+  memuse.Start();
   Run(session);
+  auto [vss, rss, gpu_mem] = memuse.GetMemInfo();
+  memuse.Stop();
+  LOG(INFO) << "vss: " << vss / 1024. << " MB";
+  LOG(INFO) << "rss: " << rss / 1024. << " MB";
+  LOG(INFO) << "gpu_mem: " << gpu_mem / 1024. / 1024. << " MB";
 
   if (FLAGS_dataDir != "") {
     RunDataSet(session);
