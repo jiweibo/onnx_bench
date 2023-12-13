@@ -495,34 +495,43 @@ void Run(Ort::Session& session) {
   std::vector<std::string> output_names(num_output_nodes);
   std::vector<std::vector<int64_t>> input_node_dims(num_input_nodes);
   std::vector<std::vector<int64_t>> output_node_dims(num_output_nodes);
+  std::vector<ONNXTensorElementDataType> input_types(num_input_nodes);
+  std::vector<ONNXTensorElementDataType> output_types(num_output_nodes);
+  std::vector<const char*> input_names_char(num_input_nodes);
+  std::vector<const char*> output_names_char(num_output_nodes);
+
   for (size_t i = 0; i < num_input_nodes; ++i) {
     input_names[i] = session.GetInputNameAllocated(i, allocator).get();
+    input_names_char[i] = input_names[i].c_str();
     auto type_info = session.GetInputTypeInfo(i);
     auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
     input_node_dims[i] = tensor_info.GetShape();
+    input_types[i] = tensor_info.GetElementType();
 
     if (input_node_dims[i][0] == -1) {
       input_node_dims[i][0] = FLAGS_batch;
     }
 
     LOG(INFO) << "Input " << i << " : name = " << input_names[i]
-              << ", type = " << tensor_info.GetElementType()
+              << ", type = " << input_types[i]
               << ", num_dims = " << input_node_dims[i].size()
               << ", dims = " << PrintShape(input_node_dims[i]);
   }
   for (size_t i = 0; i < num_output_nodes; ++i) {
     output_names[i] = session.GetOutputNameAllocated(i, allocator).get();
+    output_names_char[i] = output_names[i].c_str();
 
     auto type_info = session.GetOutputTypeInfo(i);
     auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
     output_node_dims[i] = type_info.GetTensorTypeAndShapeInfo().GetShape();
+    output_types[i] = tensor_info.GetElementType();
 
     if (output_node_dims[i][0] == -1) {
       output_node_dims[i][0] = FLAGS_batch;
     }
 
     LOG(INFO) << "Output " << i << " : name = " << output_names[i]
-              << ", type = " << tensor_info.GetElementType()
+              << ", type = " << output_types[i]
               << ", num_dims = " << output_node_dims[i].size()
               << ", dims = " << PrintShape(output_node_dims[i]);
   }
@@ -532,14 +541,50 @@ void Run(Ort::Session& session) {
   StopWatchTimer timer_run;
   StopWatchTimer timer_h2d;
 
+  std::vector<Ort::Value> input_tensors;
+  input_tensors.reserve(num_input_nodes);
+  for (int i = 0; i < num_input_nodes; ++i) {
+    input_tensors.push_back(Ort::Value{nullptr});
+  }
+  auto RunPerBatchNoBind = [&]() {
+    for (size_t i = 0; i < num_input_nodes; ++i) {
+      auto name = input_names[i];
+      auto type = input_types[i];
+      auto* data = GenerateData(input_node_dims[i], type);
+      ptr_to_free.push_back(data);
+      auto& shape = input_node_dims[i];
+
+      size_t num = std::accumulate(shape.begin(), shape.end(), SizeOf(type),
+                                   std::multiplies<int>());
+
+      Ort::Value tensor{nullptr};
+      timer_h2d.Start();
+      tensor = Ort::Value::CreateTensor(mem_info, data, num, shape.data(),
+                                        shape.size(), type);
+      timer_h2d.Stop();
+      input_tensors[i] = std::move(tensor);
+    }
+    timer_run.Start();
+    auto output_tensors = session.Run(
+        Ort::RunOptions{nullptr}, input_names_char.data(), input_tensors.data(),
+        num_input_nodes, output_names_char.data(), num_output_nodes);
+    cudaDeviceSynchronize();
+    timer_run.Stop();
+
+    for (auto v : ptr_to_free) {
+      free(v);
+    }
+    ptr_to_free.clear();
+
+    return output_tensors;
+  };
+
   auto RunPerBatch = [&]() {
     bind.ClearBoundInputs();
     bind.ClearBoundOutputs();
 
     for (size_t i = 0; i < num_input_nodes; ++i) {
-      auto type = session.GetInputTypeInfo(i)
-                      .GetTensorTypeAndShapeInfo()
-                      .GetElementType();
+      auto type = input_types[i];
       auto* data = GenerateData(input_node_dims[i], type);
       ptr_to_free.push_back(data);
       auto tensor = InitTensorFromData(data, input_node_dims[i], type);
@@ -575,7 +620,7 @@ void Run(Ort::Session& session) {
     RunPerBatch();
   }
   timer_run.Reset();
-  // timer_h2d.Reset();
+  timer_h2d.Reset();
 
   for (size_t i = 0; i < FLAGS_repeats; ++i) {
     auto output_tensors = RunPerBatch();
@@ -600,7 +645,8 @@ void Run(Ort::Session& session) {
   LOG(INFO) << "Run+D2H Average time " << timer_run.GetAverageTime()
             << ", variance: " << timer_run.ComputeVariance()
             << ", tp99: " << timer_run.ComputePercentile(0.99);
-  LOG(INFO) << "H2D+RUN+D2H time " << timer_h2d.GetAverageTime() + timer_run.GetAverageTime();
+  LOG(INFO) << "H2D+RUN+D2H time "
+            << timer_h2d.GetAverageTime() + timer_run.GetAverageTime();
 }
 
 void RunDataSet(Ort::Session& session) {
