@@ -31,7 +31,8 @@
 *.out
 *.app
 
-build/
+build*/
+cache*/
 .cache/
 .vscode/
 compile_commands.json

@@ -53,12 +53,12 @@ DEFINE_string(trtPreferPrecisionNodes, "", "prefer fp32 nodes");
 DEFINE_string(trtForcePrecisionOps, "", "force ops");
 DEFINE_string(trtForcePrecisionNodes, "", "force nodes");
 
-// TODO:
-// DEFINE_string(
-//     loadInputs, "",
-//     "Load input values from files (default = generate random inputs). Input "
-//     "names can be wrapped with single quotes (ex: 'Input:0.in')");
-// DEFINE_string(inputType, "json", "txt, bin, json etc.");
+DEFINE_string(
+    loadInputs, "",
+    "Load input values from files (default = generate random inputs). Input "
+    "names can be wrapped with single quotes (ex: "
+    "'Input0:a.npy,Input1:b.npy')");
+DEFINE_string(inputType, "npz", "npz, npy, txt, bin, json etc.");
 
 DEFINE_string(dataDir, "", "a dir which stores lots of json file");
 
@@ -73,6 +73,50 @@ template <typename T> std::string PrintShape(const std::vector<T>& v) {
   }
   ss << v.back();
   return ss.str();
+}
+
+std::vector<std::string> SplitToStringVec(std::string const& s,
+                                          char separator) {
+  std::vector<std::string> splitted;
+
+  for (size_t start = 0; start < s.length();) {
+    size_t separatorIndex = s.find(separator, start);
+    if (separatorIndex == std::string::npos) {
+      separatorIndex = s.length();
+    }
+    splitted.emplace_back(s.substr(start, separatorIndex - start));
+    start = separatorIndex + 1;
+  }
+
+  return splitted;
+}
+
+std::map<std::string, std::string> ParseInputs(const std::string& ins) {
+  auto items = SplitToStringVec(ins, ',');
+  std::map<std::string, std::string> res;
+  for (auto& item : items) {
+    auto str = SplitToStringVec(item, ':');
+    CHECK_EQ(str.size(), 2U);
+    res[str[0]] = str[1];
+  }
+  return res;
+}
+
+std::map<std::string, cnpy::NpyArray> LoadInputFile(const std::string& str) {
+  std::map<std::string, cnpy::NpyArray> res;
+  auto input_info = ParseInputs(str);
+  for (auto it = input_info.begin(); it != input_info.end(); ++it) {
+    auto& name = it->first;
+    auto& file = it->second;
+    cnpy::NpyArray array = cnpy::npy_load(file);
+    res[name] = array;
+  }
+  return res;
+}
+
+cnpy::npz_t LoadNpzFile(const std::string& str) {
+  cnpy::npz_t res = cnpy::npz_load(str);
+  return res;
 }
 
 class NvtxRange {
@@ -260,6 +304,10 @@ void DumpTensors(const std::vector<Ort::Value>& tensors,
   CHECK_EQ(tensors.size(), names.size());
   for (size_t i = 0; i < tensors.size(); ++i) {
     auto& tensor = tensors[i];
+    if (!tensor.IsTensor()) {
+      LOG(WARNING) << "Output " << i << " is not Tensor, skip dump.";
+      continue;
+    }
     auto& name = names[i];
     auto type_info = tensor.GetTensorTypeAndShapeInfo();
     auto type = type_info.GetElementType();
@@ -546,6 +594,12 @@ void Run(Ort::Session& session) {
   for (int i = 0; i < num_input_nodes; ++i) {
     input_tensors.push_back(Ort::Value{nullptr});
   }
+
+  cnpy::npz_t npz_data;
+  if (FLAGS_loadInputs != "") {
+    npz_data = LoadNpzFile(FLAGS_loadInputs);
+  }
+
   auto RunPerBatchNoBind = [&]() {
     for (size_t i = 0; i < num_input_nodes; ++i) {
       auto name = input_names[i];
@@ -585,8 +639,13 @@ void Run(Ort::Session& session) {
 
     for (size_t i = 0; i < num_input_nodes; ++i) {
       auto type = input_types[i];
-      auto* data = GenerateData(input_node_dims[i], type);
-      ptr_to_free.push_back(data);
+      void* data{nullptr};
+      if (FLAGS_loadInputs != "") {
+        data = &(*npz_data.at(input_names[i]).data_holder)[0];
+      } else {
+        data = GenerateData(input_node_dims[i], type);
+        ptr_to_free.push_back(data);
+      }
       auto tensor = InitTensorFromData(data, input_node_dims[i], type);
       nvtx_h2d.Begin();
       timer_h2d.Start();
@@ -630,7 +689,8 @@ void Run(Ort::Session& session) {
         auto& out = output_tensors[j];
         if (out.IsTensor()) {
           LOG(INFO) << "Mean value " << j << " : "
-                    << MeanValue(output_tensors[j]);
+                    << MeanValue(output_tensors[j]) << ", Shape: "
+                    << PrintShape(out.GetTensorTypeAndShapeInfo().GetShape());
         }
       }
       if (FLAGS_dumpOutput != "") {
@@ -638,7 +698,7 @@ void Run(Ort::Session& session) {
       }
     }
   }
-
+  LOG(INFO) << "------------------------------";
   LOG(INFO) << "H2D Average time " << timer_h2d.GetAverageTime()
             << ", variance: " << timer_h2d.ComputeVariance()
             << ", tp99: " << timer_h2d.ComputePercentile(0.99);
