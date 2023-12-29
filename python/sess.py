@@ -12,6 +12,7 @@ class Session:
         provider: str,
         precision: str = "fp32",
         cache_dir: str = None,
+        filter_ops: str = None,
         device_id: int = 0,
     ):
         if not pathlib.Path(onnx_model).exists():
@@ -20,6 +21,7 @@ class Session:
         self.provider = provider
         self.precision = precision
         self.cache_dir = cache_dir
+        self.filter_ops = filter_ops
         self.device_id = device_id
 
         self.onnx_model = onnx_model
@@ -43,12 +45,12 @@ class Session:
                     {
                         "device_id": self.device_id,
                         "trt_max_workspace_size": 1 << 31,
-                        "trt_fp16_enable": self.precision == "fp32",
+                        "trt_fp16_enable": self.precision == "fp16",
                         "trt_engine_cache_enable": self.cache_dir != None,
                         "trt_engine_cache_path": self.cache_dir,
                         # 'trt_max_partition_iterations':1000,
                         "trt_min_subgraph_size": 1,
-                        # 'trt_filter_ops': None,
+                        'trt_filter_ops': self.filter_ops,
                         # 'trt_force_fp32_ops': 'MatMul_154 MatMul_171 Concat_194 ReduceMean_360 Sqrt_363',
                     },
                 ),

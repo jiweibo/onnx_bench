@@ -37,5 +37,5 @@ cache*/
 .vscode/
 compile_commands.json
 
-__pychache__/
+__pycache__*/
 *_pb2.py
