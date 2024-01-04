@@ -21,7 +21,7 @@ def check(base, ref):
     print('shape is ', base.shape)
     if base.size == 0:
         return
-    if base.dtype == np.bool:
+    if base.dtype == bool:
         base = base.astype(np.int32)
         ref = ref.astype(np.int32)
     base = base.flatten()

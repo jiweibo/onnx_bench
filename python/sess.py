@@ -12,6 +12,7 @@ class Session:
         provider: str,
         precision: str = "fp32",
         cache_dir: str = None,
+        trt_min_subgraph_size: int = 1,
         filter_ops: str = None,
         device_id: int = 0,
     ):
@@ -21,6 +22,7 @@ class Session:
         self.provider = provider
         self.precision = precision
         self.cache_dir = cache_dir
+        self.trt_min_subgraph_size = trt_min_subgraph_size
         self.filter_ops = filter_ops
         self.device_id = device_id
 
@@ -49,7 +51,7 @@ class Session:
                         "trt_engine_cache_enable": self.cache_dir != None,
                         "trt_engine_cache_path": self.cache_dir,
                         # 'trt_max_partition_iterations':1000,
-                        "trt_min_subgraph_size": 1,
+                        "trt_min_subgraph_size": self.trt_min_subgraph_size,
                         'trt_filter_ops': self.filter_ops,
                         # 'trt_force_fp32_ops': 'MatMul_154 MatMul_171 Concat_194 ReduceMean_360 Sqrt_363',
                     },

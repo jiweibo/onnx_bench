@@ -7,8 +7,9 @@ cd "$DIR"
 model=$1
 precision=$2
 node_names=$3
-base_provider=${4:-cuda}
-ref_provider=${5:-trt}
+input_npz=$4
+base_provider=${5:-cuda}
+ref_provider=${6:-trt}
 
 if [ ! -f "$model" ]; then
     echo "$model not found."
@@ -32,8 +33,14 @@ fi
 base_out=$tmp_dir/${base_provider}_out.npz
 ref_out=$tmp_dir/${ref_provider}_out.npz
 
-$ONNX_BENCH --onnx $prune_model --provider $base_provider --dumpOutput $base_out --batch 32
-$ONNX_BENCH --onnx $prune_model --provider $ref_provider --precision $precision --dumpOutput $ref_out --batch 32
+if [[ -z "$input_npz" ]];then
+  load_input=""
+else
+  load_input="--loadInputs $input_npz"
+fi
+
+$ONNX_BENCH --onnx $prune_model --provider $base_provider --dumpOutput $base_out $load_input
+$ONNX_BENCH --onnx $prune_model --provider $ref_provider --precision $precision --dumpOutput $ref_out $load_input
 
 # check precision
 $PYTHON check.py $base_out $ref_out
