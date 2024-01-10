@@ -10,8 +10,18 @@
 
 #include <cuda_runtime_api.h>
 
+#include <nvml.h>
+
 class MemoryUse {
 public:
+  MemoryUse(int device_id) {
+    // Initialize NVML library
+    auto status = nvmlInit();
+
+    // Query device handle
+    status = nvmlDeviceGetHandleByIndex(device_id, &device_);
+  }
+
   void Start() {
     run_.store(true);
     cpu_mem_thread_ = std::thread(&MemoryUse::GetCpuMemory, this);
@@ -83,6 +93,11 @@ private:
       size_t free_bytes;
       size_t total_bytes;
       auto status = cudaMemGetInfo(&free_bytes, &total_bytes);
+//       unsigned int count;
+//       nvmlProcessInfo_t infos;
+// #define NVML_NO_UNVERSIONED_FUNC_DEFS 1
+//       nvmlDeviceGetComputeRunningProcesses_v2(device_, &count, &infos);
+      // std::cout << "count is " << count << std::endl;
       if (status != cudaSuccess) {
         std::cerr << "Error: cudaMemGetInfo fails, "
                   << cudaGetErrorString(status) << std::endl;
@@ -103,4 +118,5 @@ private:
   size_t gpu_mem_ = 0;
   std::thread gpu_mem_thread_;
   std::thread cpu_mem_thread_;
+  nvmlDevice_t device_;
 };

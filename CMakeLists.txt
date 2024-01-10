@@ -8,6 +8,10 @@ include(cmake/third_party.cmake)
 
 set(ORT_DIR "/usr" CACHE PATH "onnxruntime root dir")
 
+include_directories(${CMAKE_SOURCE_DIR})
+
+include_directories(/usr/include/ifx)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -18,9 +22,23 @@ include_directories("${ORT_DIR}/include")
 link_directories("${ORT_DIR}/lib")
 
 add_executable(onnx_bench main.cc)
-set(DEPS glog gflags pthread cudart nvToolsExt cnpy jsoncpp z)
+set(DEPS glog gflags pthread cudart nvToolsExt cnpy jsoncpp z nvidia-ml)
 target_link_libraries(onnx_bench onnxruntime)
 target_link_libraries(onnx_bench ${DEPS})
+
+add_executable(demo simple_demo.cc)
+target_link_libraries(demo onnxruntime)
+target_link_libraries(demo ${DEPS})
+
+# add_executable(onnx_bench2 main2.cc)
+# target_link_libraries(onnx_bench2 onnxruntime)
+# target_link_libraries(onnx_bench2 ${DEPS})
+
+#add_executable(ifx_bench ifx_main.cc)
+#set(DEPS glog gflags pthread cudart nvToolsExt cnpy jsoncpp z)
+#target_link_libraries(ifx_bench ifx onnxruntime)
+##target_link_libraries(ifx_bench onnxruntime)
+#target_link_libraries(ifx_bench ${DEPS})
 
 add_executable(test_dataset dataset_test.cc)
 target_link_libraries(test_dataset jsoncpp)
