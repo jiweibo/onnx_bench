@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <map>
 #include <numeric>
@@ -221,8 +222,16 @@ public:
 
     for (auto& hook : before_run_d2h_hook_)
       hook();
-    session_->Run(Ort::RunOptions{}, bind);
-    bind.SynchronizeOutputs();
+    try {
+      session_->Run(Ort::RunOptions{}, bind);
+      bind.SynchronizeOutputs();
+    } catch (const Ort::Exception& ex) {
+      LOG(FATAL) << config_.onnx_file << " failed. Onnxruntime Error: " << ex.what();
+    } catch (const std::exception& ex) {
+      LOG(FATAL) << config_.onnx_file << " failed. Unexpected error occured: " << ex.what();
+    } catch (...) {
+      LOG(FATAL) << config_.onnx_file << " failed. Unexpected error occured";
+    }
     for (auto& hook : after_run_d2h_hook_)
       hook();
 
@@ -262,10 +271,19 @@ public:
     }
     for (auto& hook : before_run_d2h_hook_)
       hook();
-    auto outs = session_->Run(Ort::RunOptions{nullptr},
-                              input_names_char_.data(), input_tensors.data(),
-                              in_cnt_, output_names_char_.data(), out_cnt_);
-    cudaDeviceSynchronize();
+    std::vector<Ort::Value> outs;
+    try {
+      outs = session_->Run(Ort::RunOptions{nullptr},
+                                input_names_char_.data(), input_tensors.data(),
+                                in_cnt_, output_names_char_.data(), out_cnt_);
+      cudaDeviceSynchronize();
+    } catch (const Ort::Exception& ex) {
+      LOG(FATAL) << config_.onnx_file << " failed. Onnxruntime Error: " << ex.what();
+    } catch (const std::exception& ex) {
+      LOG(FATAL) << config_.onnx_file << " failed. Unexpected error occured: " << ex.what();
+    } catch (...) {
+      LOG(FATAL) << config_.onnx_file << " failed. Unexpected error occured";
+    }
     for (auto& hook : after_run_d2h_hook_)
       hook();
 
