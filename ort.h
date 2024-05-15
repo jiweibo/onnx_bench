@@ -139,8 +139,8 @@ public:
   }
 
   Tensor(Tensor&& other) {
-    if (ort_val_) {
-      this->ort_val_ = std::move(ort_val_);
+    if (other.ort_val_) {
+      this->ort_val_ = std::move(other.ort_val_);
     }
 
     this->name = other.name;
@@ -151,8 +151,8 @@ public:
   }
 
   Tensor& operator=(Tensor&& other) {
-    if (ort_val_) {
-      this->ort_val_ = std::move(ort_val_);
+    if (other.ort_val_) {
+      this->ort_val_ = std::move(other.ort_val_);
     }
 
     this->name = other.name;

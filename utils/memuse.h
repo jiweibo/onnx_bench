@@ -15,11 +15,11 @@
 class MemoryUse {
 public:
   MemoryUse(int device_id) {
-    // Initialize NVML library
-    auto status = nvmlInit();
+    // // Initialize NVML library
+    // auto status = nvmlInit();
 
-    // Query device handle
-    status = nvmlDeviceGetHandleByIndex(device_id, &device_);
+    // // Query device handle
+    // status = nvmlDeviceGetHandleByIndex(device_id, &device_);
   }
 
   void Start() {
