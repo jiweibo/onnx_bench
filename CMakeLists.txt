@@ -35,7 +35,7 @@ target_link_libraries(demo ${DEPS})
 # target_link_libraries(onnx_bench2 onnxruntime)
 # target_link_libraries(onnx_bench2 ${DEPS})
 
-add_executable(ifx_bench ifx_main.cu)
+add_executable(ifx_bench ifx_main.cc)
 set(DEPS glog gflags pthread cudart nvToolsExt cnpy jsoncpp z)
 target_link_libraries(ifx_bench ifx cublas)
 target_link_libraries(ifx_bench ${DEPS})

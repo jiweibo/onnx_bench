@@ -33,34 +33,19 @@
 #include "cnpy.h"
 #include "ifx_sess.h"
 
-// #include "cutlass/gemm/device/gemm.h"
-// #include "cutlass/arch/mma.h"
-// #include "cutlass/gemm_coord.h"
-// #include "cutlass/half.h"
-// #include "cutlass/layout/matrix.h"
-// #include "cutlass/util/host_tensor.h"
-// #include "cutlass/util/reference/host/tensor_copy.h"
-// #include "cutlass/util/reference/host/tensor_fill.h"
-
-#include <cublas_v2.h>
-
 using namespace ifx_sess;
 
-DEFINE_string(ifx, "", "ifx model file");
-// DEFINE_string(camera_fusion_all_ifx, "", "ifx model file");
-// DEFINE_string(lane_detection_ifx, "", "ifx model file");
-// DEFINE_string(occupancy_model_ifx, "", "ifx model file");
-// DEFINE_string(point_pillar, "", "ifx model file");
+// DEFINE_string(ifx, "", "ifx model file");
 DEFINE_string(ifxs, "", "a.ifxmodel b.ifxmodel c.ifxmodel ....");
+DEFINE_string(ifx_threads, "", "1 1 1 ...");
+DEFINE_string(bs, "", "1 12 1 ...");
 
 DEFINE_int32(device_id, 0, "device id");
-DEFINE_int32(batch, 1, "batch");
+DEFINE_int32(batch, -1, "batch");
 DEFINE_int32(warmup, 0, "warmup");
 DEFINE_int32(repeats, 1, "repeats");
 DEFINE_string(precision, "fp32", "fp32, fp16, int8");
 DEFINE_string(cacheDir, "", "the cache dir");
-
-DEFINE_int32(n, 128, "mnk");
 
 // DEFINE_string(provider, "cpu", "cpu, openvino, cuda, trt");
 
@@ -177,13 +162,32 @@ std::vector<std::string> GetModels(const std::string& ifxs) {
   return res;
 }
 
-void Run(Ifx_Sess& session, Barrier* barrier = nullptr) {
+// "x y z" -> {x, y, z}
+std::vector<int> ParseStrToVec(const std::string& str) {
+  std::vector<int> res;
+  int pos = 0;
+  const char* sep = " ";
+
+  size_t found = str.find(sep, pos);
+  while (found != std::string::npos) {
+    auto s = str.substr(pos, found - pos);
+    res.push_back(std::stoi(s));
+    pos = found + 1;
+    found = str.find(sep, pos);
+  }
+  auto s = str.substr(pos, found - pos);
+  res.push_back(std::stoi(s));
+  return res;
+}
+
+void Run(Ifx_Sess& session, Barrier* barrier = nullptr, int repeats = 1, int batch=-1) {
   std::map<std::string, Tensor> in_tensors;
   std::vector<void*> to_free(session.InputDtypes().size());
 
   for (size_t i = 0; i < session.InputNames().size(); ++i) {
     auto& name = session.InputNames()[i];
     auto in_dims = session.InputDims()[i];
+    if (batch != -1) in_dims[0] = batch;
     auto* data = GenerateData(in_dims, session.InputDtypes()[i]);
     to_free.push_back(data);
     std::vector<int32_t> in_dims_32(in_dims.begin(), in_dims.end());
@@ -192,67 +196,29 @@ void Run(Ifx_Sess& session, Barrier* barrier = nullptr) {
     in_tensors.emplace(name, std::move(ifx_tensor));
   }
 
-  if (barrier)
-    barrier->Wait();
   StopWatchTimer timer;
-  for (size_t i = 0; i < FLAGS_repeats; ++i) {
+  NvtxRange nvtx(session.Config().ifx_file);
+  for (size_t i = 0; i < repeats; ++i) {
+    nvtx.Begin();
+    if (barrier)
+      barrier->Wait();
+    std::uniform_int_distribution<> dis(0, 300);
+    std::this_thread::sleep_for(std::chrono::microseconds(dis(e)));
     timer.Start();
     auto out_tensors = session.Run(in_tensors);
-    cudaDeviceSynchronize();
     timer.Stop();
+    nvtx.End();
   }
   LOG(INFO) << std::this_thread::get_id() << " " << session.Config().ifx_file
-            << " time is " << timer.GetAverageTime() << " ms";
+            << " time is " << timer.GetAverageTime() << " ms"
+            << ", tp50: " << timer.ComputePercentile(0.5)
+            << ", tp90: " << timer.ComputePercentile(0.9)
+            << ", tp99: " << timer.ComputePercentile(0.99);
 
   for (auto* p : to_free) {
     free(p);
   }
 }
-
-void gemm_mnk(cublasHandle_t handle, float* a, float* b, float* c, int n) {
-  float alpha = 1.0;
-  float beta = 0;
-  for (size_t i = 0; i < 10000; ++i) {
-    auto s = cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &alpha, a,
-                          CUDA_R_32F, n, b, CUDA_R_32F, n, &beta, c, CUDA_R_32F,
-                          n, CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
-    CHECK_EQ(s, CUBLAS_STATUS_SUCCESS);
-    cudaDeviceSynchronize();
-  }
-  // cublasHgemm(cublas_handle, cublasOperation_t::CUBLAS_OP_N,
-  // cublasOperation_t transb, int m, int n, int k, const __half *alpha, const
-  // __half *A, int lda, const __half *B, int ldb, const __half *beta, __half
-  // *C, int ldc)
-}
-
-class BlasGemmEx {
-public:
-  BlasGemmEx(float alpha, float beta) {
-    status_ = cublasCreate(&handle_);
-    CHECK_EQ(status_, CUBLAS_STATUS_SUCCESS);
-    cudaError_t status = cudaStreamCreate(&stream_);
-    CHECK_EQ(status, cudaSuccess);
-    cublasSetStream(handle_, stream_);
-  }
-
-  void GemmEx(bool transa, bool transb, int m, int n, int k, const void* alpha,
-              const void* A, cudaDataType Atype, int lda, const void* B,
-              cudaDataType Btype, int ldb, const void* beta, void* C,
-              cudaDataType Ctype, int ldc, cudaDataType computeType,
-              cublasGemmAlgo_t algo) {
-    status_ = cublasGemmEx(handle_, transa ? CUBLAS_OP_T : CUBLAS_OP_N,
-                           transb ? CUBLAS_OP_T : CUBLAS_OP_N, m, n, k, alpha,
-                           A, Atype, lda, B, Btype, ldb, beta, C, Ctype, ldc,
-                           computeType, algo);
-    CHECK_EQ(status_, CUBLAS_STATUS_SUCCESS);
-  }
-
-private:
-  cublasHandle_t handle_;
-  cublasStatus_t status_;
-  cudaStream_t stream_;
-};
-
 } // namespace
 
 int main(int argc, char** argv) {
@@ -262,89 +228,67 @@ int main(int argc, char** argv) {
     LOG(FATAL) << "Please set --ifxs flag.";
   }
 
-  cublasHandle_t handle = NULL;
-  cublasStatus_t status;
-  status = cublasCreate(&handle);
-  CHECK_EQ(status, CUBLAS_STATUS_SUCCESS);
-  cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
-  cudaStream_t stream = NULL;
-  cudaStreamCreate(&stream);
-  cublasSetStream(handle, stream);
-  int n = FLAGS_n;
-  float* a;
-  float* b;
-  float* c;
-  cudaMalloc((void**)&a, n * n * sizeof(float));
-  cudaMalloc((void**)&b, n * n * sizeof(float));
-  cudaMalloc((void**)&c, n * n * sizeof(float));
-  // gemm_mnk(handle, a, b, c, n);
-
   auto ifx_paths = GetModels(FLAGS_ifxs);
-  auto configs = ParseFlags(ifx_paths);
+  std::vector<int> ifx_threads;
+  if (FLAGS_ifx_threads.empty()) {
+    ifx_threads.resize(ifx_paths.size());
+      for (auto& t : ifx_threads)
+        t = 1;
+  } else {
+    ifx_threads = ParseStrToVec(FLAGS_ifx_threads);
+    CHECK_EQ(ifx_paths.size(), ifx_threads.size());
+  }
 
-  std::vector<std::thread> threads(ifx_paths.size() + 2);
-  Barrier barrier(ifx_paths.size() + 2);
+  std::vector<int> bs;
+  if (FLAGS_bs.empty()) {
+    bs.resize(ifx_paths.size());
+    for (auto& t : bs) t = -1;
+  } else {
+    bs = ParseStrToVec(FLAGS_bs);
+    CHECK_EQ(ifx_paths.size(), bs.size());
+  }
+
+  auto configs = ParseFlags(ifx_paths);
+  int total_threads = 0;
+  for (auto& t : ifx_threads) {
+    total_threads += t;
+  }
+
+  std::vector<std::thread> threads(total_threads);
+  Barrier barrier(total_threads);
   std::vector<Ifx_Sess> sessions;
+  // std::vector<NvtxRange> nvtxs;
   for (auto& config : configs) {
     sessions.emplace_back(config);
+    // nvtxs.emplace_back(config.ifx_file);
   }
   for (size_t i = 0; i < sessions.size(); ++i) {
-    Run(sessions[i]);
+    Run(sessions[i], nullptr, FLAGS_warmup);
   }
 
-  // SessConfig cfa_config = config;
-  // cfa_config.ifx_file = "./camera_fusion_all.ifxmodel";
-  // Ifx_Sess cfa_session(cfa_config);
-
-  // std::map<std::string, Tensor> in_tensors;
-
-  // StopWatchTimer timer_h2d, timer_run_d2h;
-  // NvtxRange nvtx_h2d("h2d"), nvtx_run_d2h("run_d2h");
-  // session.RegisterBeforeH2DHook([&]() { timer_h2d.Start(); });
-  // session.RegisterAfterH2DHook([&]() { timer_h2d.Stop(); });
-  // session.RegisterBeforeRunD2HHook([&]() { timer_run_d2h.Start(); });
-  // session.RegisterAfterRunD2HHook([&]() { timer_run_d2h.Stop(); });
-  // session.RegisterBeforeRunD2HHook([&]() { nvtx_run_d2h.Begin(); });
-  // session.RegisterAfterRunD2HHook([&]() { nvtx_run_d2h.End(); });
-
-  // for (int i = 0; i < FLAGS_warmup; ++i) {
-  // Run(session);
-  // Run(cfa_session);
-  // }
   LOG(INFO) << "--------- Warmup done ---------";
-  // MemoryUse checker(configs[0].device_id);
-  // checker.Start();
-  auto gemm_t = std::thread(gemm_mnk, handle, a, b, c, n);
-  for (size_t i = 0; i < sessions.size(); ++i) {
-    threads[i] = std::thread(Run, std::ref(sessions[i]), &barrier);
+  MemoryUse checker(configs[0].device_id);
+  checker.Start();
+
+  int thread_num = 0;
+  for (size_t i = 0; i < ifx_threads.size(); ++i) {
+    for (size_t j = 0; j < ifx_threads[i]; ++j) {
+      threads[thread_num++] = std::thread(Run, std::ref(sessions[i]), &barrier, FLAGS_repeats, bs[i]);
+    }
   }
-  threads[threads.size() - 2] =
-      std::thread(Run, std::ref(sessions[0]), &barrier);
-  threads[threads.size() - 1] =
-      std::thread(Run, std::ref(sessions[0]), &barrier);
   for (size_t i = 0; i < threads.size(); ++i) {
     threads[i].join();
   }
 
-  gemm_t.join();
-  // auto [vsz, rss, gpu] = checker.GetMemInfo();
-  // checker.Stop();
+  auto mem = checker.GetMemInfo();
+  auto vsz = std::get<0>(mem);
+  auto rss = std::get<1>(mem);
+  auto gpu = std::get<2>(mem);
+  checker.Stop();
 
-  // // LOG(INFO) << "------------------------------";
-  // // LOG(INFO) << "H2D Average time " << timer_h2d.GetAverageTime()
-  // //           << ", variance: " << timer_h2d.ComputeVariance()
-  // //           << ", tp50: " << timer_h2d.ComputePercentile(0.5)
-  // //           << ", tp99: " << timer_h2d.ComputePercentile(0.99);
-  // // LOG(INFO) << "Run+D2H Average time " << timer_run_d2h.GetAverageTime()
-  // //           << ", variance: " << timer_run_d2h.ComputeVariance()
-  // //           << ", tp50: " << timer_run_d2h.ComputePercentile(0.5)
-  // //           << ", tp99: " << timer_run_d2h.ComputePercentile(0.99);
-  // // LOG(INFO) << "H2D+RUN+D2H Average time "
-  // //           << timer_h2d.GetAverageTime() +
-  // timer_run_d2h.GetAverageTime();
-
-  // std::cout << "vsz: " << vsz / 1024.0 << std::endl;
-  // std::cout << "rss: " << rss / 1024.0 << std::endl;
-  // std::cout << "gpu: " << gpu / (1024.0 * 1024.0) << std::endl;
+  std::cout << "vsz: " << vsz / 1024.0 << std::endl;
+  std::cout << "rss: " << rss / 1024.0 << std::endl;
+  std::cout << "gpu: " << gpu / (1024.0 * 1024.0) << std::endl;
   return 0;
 }
+
