@@ -35,11 +35,12 @@ target_link_libraries(demo ${DEPS})
 # target_link_libraries(onnx_bench2 onnxruntime)
 # target_link_libraries(onnx_bench2 ${DEPS})
 
+# To use old nvml lib, we need the macro
+add_definitions(-DNVML_NO_UNVERSIONED_FUNC_DEFS)
+
 add_executable(ifx_bench ifx_main.cc)
-set(DEPS glog gflags pthread cudart nvToolsExt cnpy jsoncpp z)
 target_link_libraries(ifx_bench ifx cublas)
 target_link_libraries(ifx_bench ${DEPS})
-# set_target_properties(ifx_bench PROPERTIES CUDA_ARCHITECTURES "75;86")
 
 add_executable(test_dataset dataset_test.cc)
 target_link_libraries(test_dataset jsoncpp)

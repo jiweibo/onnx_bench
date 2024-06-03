@@ -20,6 +20,7 @@
 #include "ifx.h"
 #include "utils/barrier.h"
 #include "utils/memuse.h"
+#include "utils/nvml.h"
 #include "utils/nvtx.h"
 #include "utils/timer.h"
 
@@ -223,6 +224,20 @@ void Run(Ifx_Sess& session, Barrier* barrier = nullptr, int repeats = 1, int bat
 
 int main(int argc, char** argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
+
+  NVMLWrapper nvml(FLAGS_device_id);
+  LOG(INFO) << "CUDA Driver: " << nvml.GetCudaDriverVersion();
+  LOG(INFO) << "Driver: " << nvml.GetDriverVersion();
+  LOG(INFO) << "NVML: " << nvml.GetNvmlVersion();
+  LOG(INFO) << "sm_clock: " << nvml.GetNvmlStats().sm_clock;
+  LOG(INFO) << "mem_clock: " << nvml.GetNvmlStats().memory_clock;
+  LOG(INFO) << "Temperature: " << nvml.GetNvmlStats().temperature;
+  LOG(INFO) << "Performance Stat: " << nvml.GetNvmlStats().performance_stat;
+  LOG(INFO) << "Power Usage: " << nvml.GetNvmlStats().power_usage;
+  LOG(INFO) << "PCIE GEN: " << nvml.GetNvmlStats().cur_pcie_link_gen;
+  LOG(INFO) << "PCIE Width: " << nvml.GetNvmlStats().cur_pcie_link_width;
+  LOG(INFO) << "PCIE Speed: " << nvml.GetNvmlStats().pcie_speed;
+  LOG(INFO) << "Mem Bus Width: " << nvml.GetNvmlStats().mem_bus_width;
 
   if (FLAGS_ifxs == "") {
     LOG(FATAL) << "Please set --ifxs flag.";

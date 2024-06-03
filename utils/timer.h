@@ -61,6 +61,7 @@ public:
   }
 
   double ComputeVariance() {
+    if (durations_.empty()) return -1;
     double mean = std::accumulate(durations_.begin(), durations_.end(), 0.0) /
                   durations_.size();
     double sqDiffSum = 0.0;
@@ -71,6 +72,7 @@ public:
   }
 
   double ComputePercentile(double top) {
+    if (durations_.empty()) return -1;
     std::sort(durations_.begin(), durations_.end());
     return durations_[(int)(durations_.size() * top)];
   }
