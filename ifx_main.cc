@@ -429,7 +429,6 @@ int main(int argc, char** argv) {
   }
 
   auto ifx_paths = GetIfxModels(FLAGS_ifxs);
-  LOG(INFO) << "model done";
   auto batches = ParseBatches(FLAGS_bs);
   if (!batches.empty()) {
     CHECK_EQ(ifx_paths.size(), batches.size());
@@ -437,7 +436,6 @@ int main(int argc, char** argv) {
       CHECK_EQ(ifx_paths[i].size(), batches[i].size());
     }
   }
-  LOG(INFO) << "batch done";
   std::vector<int> ifx_threads;
   if (FLAGS_ifx_threads.empty()) {
     ifx_threads.resize(ifx_paths.size());
