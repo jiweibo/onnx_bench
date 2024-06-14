@@ -37,36 +37,31 @@
 using namespace ifx_sess;
 
 // DEFINE_string(ifx, "", "ifx model file");
-DEFINE_string(ifxs, "", "a.ifxmodel b.ifxmodel c.ifxmodel ....");
-DEFINE_string(ifx_threads, "", "1 1 1 ...");
-DEFINE_string(bs, "", "1 12 1 ...");
+DEFINE_string(ifxs, "",
+              "a.ifxmodel b.ifxmodel c.ifxmodel <d.ifxmodel e.ifxmodel> ....");
+DEFINE_string(bs, "", "1 12 1 <1 3> ...");
+DEFINE_string(ifx_threads, "", "1 1 1 1 ...");
 
 DEFINE_int32(device_id, 0, "device id");
-DEFINE_int32(batch, -1, "batch");
 DEFINE_int32(warmup, 0, "warmup");
 DEFINE_int32(repeats, 1, "repeats");
 DEFINE_string(precision, "fp32", "fp32, fp16, int8");
 DEFINE_string(cacheDir, "", "the cache dir");
 
 // DEFINE_string(provider, "cpu", "cpu, openvino, cuda, trt");
-
 // DEFINE_string(
 //     dumpOutput, "",
 //     "Save the output tensor(s) of the last inference iteration in a npz file"
 //     "(default = disabled).");
-
 // TODO:
 // DEFINE_string(
 //     loadInputs, "",
 //     "Load input values from files (default = generate random inputs). Input "
 //     "names can be wrapped with single quotes (ex: 'Input:0.in')");
 // DEFINE_string(inputType, "json", "txt, bin, json etc.");
-
 // DEFINE_string(dataDir, "", "a dir which stores lots of json file");
 
 std::default_random_engine e(1998);
-
-const char* SEP = "-SEP-";
 
 namespace {
 
@@ -122,14 +117,14 @@ void* GenerateData(const std::vector<int64_t>& dims, ifx::DataType type) {
   return nullptr;
 }
 
-// template <typename T> std::string PrintShape(const std::vector<T>& v) {
-//   std::stringstream ss;
-//   for (size_t i = 0; i < v.size() - 1; ++i) {
-//     ss << v[i] << "x";
-//   }
-//   ss << v.back();
-//   return ss.str();
-// }
+template <typename T> std::string PrintShape(const std::vector<T>& v) {
+  std::stringstream ss;
+  for (size_t i = 0; i < v.size() - 1; ++i) {
+    ss << v[i] << "x";
+  }
+  ss << v.back();
+  return ss.str();
+}
 
 std::vector<SessConfig> ParseFlags(const std::vector<std::string>& ifxs) {
   std::vector<SessConfig> configs(ifxs.size());
@@ -143,6 +138,90 @@ std::vector<SessConfig> ParseFlags(const std::vector<std::string>& ifxs) {
     configs[i] = config;
   }
   return configs;
+}
+
+std::vector<std::vector<SessConfig>>
+ParseFlags(const std::vector<std::vector<std::string>>& ifx_vecs) {
+  std::vector<std::vector<SessConfig>> configs(ifx_vecs.size());
+  for (size_t i = 0; i < ifx_vecs.size(); ++i) {
+    for (size_t j = 0; j < ifx_vecs[i].size(); ++j) {
+      SessConfig config;
+      config.device_id = FLAGS_device_id;
+      config.ifx_file = ifx_vecs[i][j];
+      config.cache_dir = FLAGS_cacheDir;
+      config.use_gpu = true;
+      config.enable_fp16 = FLAGS_precision == "fp16";
+      configs[i].emplace_back(config);
+    }
+  }
+  return configs;
+}
+
+// Helper function to split a string by a delimiter and return a vector of
+// tokens
+std::vector<std::string> SplitString(const std::string& str, char delimiter) {
+  std::vector<std::string> tokens;
+  std::string token;
+  std::istringstream tokenStream(str);
+  while (std::getline(tokenStream, token, delimiter)) {
+    tokens.push_back(token);
+  }
+  return tokens;
+}
+
+// Function to trim whitespace from both ends of a string
+std::string TrimString(const std::string& str) {
+  size_t first = str.find_first_not_of(' ');
+  if (first == std::string::npos)
+    return "";
+  size_t last = str.find_last_not_of(' ');
+  return str.substr(first, last - first + 1);
+}
+
+///
+/// in:  "a.ifxmodel b.ifxmodel <c.ifxmodel d.ifxmodel> e.ifxmodel"
+/// out: {{"a.ifxmodel"}, {"b.ifxmodel"}, {"c.ifxmodel", "d.ifxmodel"},
+///      {"e.ifxmodel"}}
+///
+std::vector<std::vector<std::string>> GetIfxModels(const std::string& ifxs) {
+  std::vector<std::vector<std::string>> result;
+  std::string remaining = ifxs;
+  size_t start = 0;
+  size_t end = 0;
+
+  // Process each pair of angle brackets
+  while ((start = remaining.find('<')) != std::string::npos &&
+         (end = remaining.find('>')) != std::string::npos) {
+    // Extract the part before the first '<'
+    std::string beforeBrackets = TrimString(remaining.substr(0, start));
+    if (!beforeBrackets.empty()) {
+      std::vector<std::string> tokens = SplitString(beforeBrackets, ' ');
+      for (const std::string& token : tokens) {
+        result.push_back({token});
+      }
+    }
+
+    // Extract the part inside the brackets
+    std::string insideBrackets = remaining.substr(start + 1, end - start - 1);
+    if (!insideBrackets.empty()) {
+      std::vector<std::string> tokens = SplitString(insideBrackets, ' ');
+      result.push_back(tokens);
+    }
+
+    // Update remaining string to the part after the '>'
+    remaining = remaining.substr(end + 1);
+  }
+
+  // Process the remaining part after the last '>'
+  remaining = TrimString(remaining);
+  if (!remaining.empty()) {
+    std::vector<std::string> tokens = SplitString(remaining, ' ');
+    for (const std::string& token : tokens) {
+      result.push_back({token});
+    }
+  }
+
+  return result;
 }
 
 // a.ifxmodel;b.ifxmodel
@@ -163,6 +242,52 @@ std::vector<std::string> GetModels(const std::string& ifxs) {
   return res;
 }
 
+// "-1 1 <16 32> 2" -> {{-1}, {1}, {16, 32}, {2}}
+std::vector<std::vector<int>> ParseBatches(const std::string& str) {
+  std::vector<std::vector<int>> result;
+  std::string remaining = str;
+  size_t start = 0;
+  size_t end = 0;
+
+  // Process each pair of angle brackets
+  while ((start = remaining.find('<')) != std::string::npos &&
+         (end = remaining.find('>')) != std::string::npos) {
+    // Extract the part before the first '<'
+    std::string beforeBrackets = TrimString(remaining.substr(0, start));
+    if (!beforeBrackets.empty()) {
+      std::vector<std::string> tokens = SplitString(beforeBrackets, ' ');
+      for (const std::string& token : tokens) {
+        result.push_back({std::stoi(token)});
+      }
+    }
+
+    // Extract the part inside the brackets
+    std::string insideBrackets = remaining.substr(start + 1, end - start - 1);
+    if (!insideBrackets.empty()) {
+      std::vector<std::string> tokens = SplitString(insideBrackets, ' ');
+      std::vector<int> tmp;
+      for (const std::string& token : tokens) {
+        tmp.push_back({std::stoi(token)});
+      }
+      result.push_back(tmp);
+    }
+
+    // Update remaining string to the part after the '>'
+    remaining = remaining.substr(end + 1);
+  }
+
+  // Process the remaining part after the last '>'
+  remaining = TrimString(remaining);
+  if (!remaining.empty()) {
+    std::vector<std::string> tokens = SplitString(remaining, ' ');
+    for (const std::string& token : tokens) {
+      result.push_back({std::stoi(token)});
+    }
+  }
+
+  return result;
+}
+
 // "x y z" -> {x, y, z}
 std::vector<int> ParseStrToVec(const std::string& str) {
   std::vector<int> res;
@@ -181,14 +306,74 @@ std::vector<int> ParseStrToVec(const std::string& str) {
   return res;
 }
 
-void Run(Ifx_Sess& session, Barrier* barrier = nullptr, int repeats = 1, int batch=-1) {
+void RunCascade(std::vector<Ifx_Sess>& sessions,
+                const std::vector<int>& batches, Barrier* barrier = nullptr,
+                int repeats = 1) {
+  int in_tensor_num = 0;
+  for (auto& sess : sessions) {
+    in_tensor_num += sess.InputDtypes().size();
+  }
+  std::vector<std::map<std::string, Tensor>> in_tensors(in_tensor_num);
+  std::vector<void*> to_free(in_tensor_num);
+
+  for (size_t i = 0; i < sessions.size(); ++i) {
+    for (size_t j = 0; j < sessions[i].InputNames().size(); ++j) {
+      auto& name = sessions[i].InputNames()[j];
+      auto in_dims = sessions[i].InputDims()[j];
+      if (!batches.empty())
+        in_dims[0] = batches[i];
+      auto* data = GenerateData(in_dims, sessions[i].InputDtypes()[j]);
+      to_free.push_back(data);
+      std::vector<int32_t> in_dims_32(in_dims.begin(), in_dims.end());
+      auto ifx_tensor =
+          Tensor(name, data, in_dims_32, sessions[i].InputDtypes()[j],
+                 sessions[i].InputFormats()[j], false);
+      in_tensors[i].emplace(name, std::move(ifx_tensor));
+    }
+  }
+
+  std::vector<StopWatchTimer> timers(sessions.size());
+  std::vector<NvtxRange> nvtxs;
+  for (size_t i = 0; i < sessions.size(); ++i) {
+    nvtxs.emplace_back(sessions[i].Config().ifx_file);
+  }
+  for (size_t repeat = 0; repeat < repeats; ++repeat) {
+    if (barrier)
+      barrier->Wait();
+    // std::uniform_int_distribution<> dis(0, 300);
+    // std::this_thread::sleep_for(std::chrono::microseconds(dis(e)));
+    for (size_t i = 0; i < sessions.size(); ++i) {
+      nvtxs[i].Begin();
+      timers[i].Start();
+      auto out_tensors = sessions[i].Run(in_tensors[i]);
+      timers[i].Stop();
+      nvtxs[i].End();
+    }
+  }
+
+  for (size_t i = 0; i < sessions.size(); ++i) {
+    LOG(INFO) << std::this_thread::get_id() << " "
+              << sessions[i].Config().ifx_file << " time is "
+              << timers[i].GetAverageTime() << " ms"
+              << ", tp50: " << timers[i].ComputePercentile(0.5)
+              << ", tp90: " << timers[i].ComputePercentile(0.9)
+              << ", tp99: " << timers[i].ComputePercentile(0.99);
+  }
+  for (auto* p : to_free) {
+    free(p);
+  }
+}
+
+void Run(Ifx_Sess& session, Barrier* barrier = nullptr, int repeats = 1,
+         int batch = -1) {
   std::map<std::string, Tensor> in_tensors;
   std::vector<void*> to_free(session.InputDtypes().size());
 
   for (size_t i = 0; i < session.InputNames().size(); ++i) {
     auto& name = session.InputNames()[i];
     auto in_dims = session.InputDims()[i];
-    if (batch != -1) in_dims[0] = batch;
+    if (batch != -1)
+      in_dims[0] = batch;
     auto* data = GenerateData(in_dims, session.InputDtypes()[i]);
     to_free.push_back(data);
     std::vector<int32_t> in_dims_32(in_dims.begin(), in_dims.end());
@@ -243,24 +428,24 @@ int main(int argc, char** argv) {
     LOG(FATAL) << "Please set --ifxs flag.";
   }
 
-  auto ifx_paths = GetModels(FLAGS_ifxs);
+  auto ifx_paths = GetIfxModels(FLAGS_ifxs);
+  LOG(INFO) << "model done";
+  auto batches = ParseBatches(FLAGS_bs);
+  if (!batches.empty()) {
+    CHECK_EQ(ifx_paths.size(), batches.size());
+    for (size_t i = 0; i < ifx_paths.size(); ++i) {
+      CHECK_EQ(ifx_paths[i].size(), batches[i].size());
+    }
+  }
+  LOG(INFO) << "batch done";
   std::vector<int> ifx_threads;
   if (FLAGS_ifx_threads.empty()) {
     ifx_threads.resize(ifx_paths.size());
-      for (auto& t : ifx_threads)
-        t = 1;
+    for (auto& t : ifx_threads)
+      t = 1;
   } else {
     ifx_threads = ParseStrToVec(FLAGS_ifx_threads);
     CHECK_EQ(ifx_paths.size(), ifx_threads.size());
-  }
-
-  std::vector<int> bs;
-  if (FLAGS_bs.empty()) {
-    bs.resize(ifx_paths.size());
-    for (auto& t : bs) t = -1;
-  } else {
-    bs = ParseStrToVec(FLAGS_bs);
-    CHECK_EQ(ifx_paths.size(), bs.size());
   }
 
   auto configs = ParseFlags(ifx_paths);
@@ -271,24 +456,34 @@ int main(int argc, char** argv) {
 
   std::vector<std::thread> threads(total_threads);
   Barrier barrier(total_threads);
-  std::vector<Ifx_Sess> sessions;
-  // std::vector<NvtxRange> nvtxs;
-  for (auto& config : configs) {
-    sessions.emplace_back(config);
-    // nvtxs.emplace_back(config.ifx_file);
-  }
-  for (size_t i = 0; i < sessions.size(); ++i) {
-    Run(sessions[i], nullptr, FLAGS_warmup);
+  std::vector<std::vector<Ifx_Sess>> sessions;
+  for (size_t i = 0; i < configs.size(); ++i) {
+    std::vector<Ifx_Sess> tmp;
+    for (size_t j = 0; j < configs[i].size(); ++j) {
+      tmp.emplace_back(configs[i][j]);
+    }
+    sessions.emplace_back(tmp);
   }
 
+  for (size_t i = 0; i < sessions.size(); ++i) {
+    RunCascade(sessions[i], batches.empty() ? std::vector<int>{} : batches[i],
+               nullptr, FLAGS_warmup);
+  }
+
+  // LOG(INFO) << "Util gpu: " << nvml.GetNvmlStats().utilization.gpu;
+  // LOG(INFO) << "Util mem: " << nvml.GetNvmlStats().utilization.memory;
+
   LOG(INFO) << "--------- Warmup done ---------";
-  MemoryUse checker(configs[0].device_id);
+  MemoryUse checker(configs[0][0].device_id);
   checker.Start();
 
   int thread_num = 0;
   for (size_t i = 0; i < ifx_threads.size(); ++i) {
     for (size_t j = 0; j < ifx_threads[i]; ++j) {
-      threads[thread_num++] = std::thread(Run, std::ref(sessions[i]), &barrier, FLAGS_repeats, bs[i]);
+      threads[thread_num++] = std::thread(
+          RunCascade, std::ref(sessions[i]),
+          batches.empty() ? std::vector<int>{} : batches[i], &barrier,
+          FLAGS_repeats);
     }
   }
   for (size_t i = 0; i < threads.size(); ++i) {
@@ -306,4 +501,3 @@ int main(int argc, char** argv) {
   std::cout << "gpu: " << gpu / (1024.0 * 1024.0) << std::endl;
   return 0;
 }
-

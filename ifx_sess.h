@@ -63,6 +63,9 @@ inline std::vector<int64_t> GetShape(const ifx::IONode& node) {
   case ifx::TensorFormat::TENSOR_FORMAT_NC:
     shape = {node.sN, node.sC};
     break;
+  case ifx::TensorFormat::TENSOR_FORMAT_OI:
+    shape = {node.sO, node.sI};
+    break;
   default:
     LOG(ERROR) << "The tensor format not supported";
   }
