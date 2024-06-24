@@ -148,7 +148,7 @@ public:
   Ifx_Sess(const SessConfig& cfg) : config_(cfg) { InitSession(); }
 
   std::map<std::string, Tensor>
-  Run(const std::map<std::string, Tensor>& in_tensors) {
+  Run(const std::map<std::string, Tensor>& in_tensors, cudaStream_t stream = nullptr) {
     std::map<std::string, ifx::Tensor*> input_ifx_tensors;
     std::map<std::string, ifx::Tensor*> output_ifx_tensors;
 
@@ -168,7 +168,14 @@ public:
 
     for (auto& hook : before_run_d2h_hook_)
       hook();
-    int err = sess_->doInference(input_ifx_tensors, output_ifx_tensors);
+    int err;
+    if (stream != nullptr) {
+      err = sess_->doInference(input_ifx_tensors, output_ifx_tensors, &stream);
+      CHECK_EQ(cudaStreamSynchronize(stream),
+               cudaSuccess);
+    } else {
+      err = sess_->doInference(input_ifx_tensors, output_ifx_tensors);
+    }
     for (auto& hook : after_run_d2h_hook_)
       hook();
     CHECK(err == 0);
@@ -211,9 +218,7 @@ public:
     after_run_d2h_hook_.emplace_back(func);
   }
 
-  SessConfig Config() {
-    return config_;
-  }
+  SessConfig Config() { return config_; }
 
 private:
   void InitSession() {

@@ -41,6 +41,7 @@ DEFINE_string(ifxs, "",
               "a.ifxmodel b.ifxmodel c.ifxmodel <d.ifxmodel e.ifxmodel> ....");
 DEFINE_string(bs, "", "1 12 1 <1 3> ...");
 DEFINE_string(ifx_threads, "", "1 1 1 1 ...");
+DEFINE_string(priority, "", "-5 -5 -4 0");
 
 DEFINE_int32(device_id, 0, "device id");
 DEFINE_int32(warmup, 0, "warmup");
@@ -308,7 +309,7 @@ std::vector<int> ParseStrToVec(const std::string& str) {
 
 void RunCascade(std::vector<Ifx_Sess>& sessions,
                 const std::vector<int>& batches, Barrier* barrier = nullptr,
-                int repeats = 1) {
+                cudaStream_t stream = nullptr, int repeats = 1) {
   int in_tensor_num = 0;
   for (auto& sess : sessions) {
     in_tensor_num += sess.InputDtypes().size();
@@ -345,7 +346,7 @@ void RunCascade(std::vector<Ifx_Sess>& sessions,
     for (size_t i = 0; i < sessions.size(); ++i) {
       nvtxs[i].Begin();
       timers[i].Start();
-      auto out_tensors = sessions[i].Run(in_tensors[i]);
+      auto out_tensors = sessions[i].Run(in_tensors[i], stream);
       timers[i].Stop();
       nvtxs[i].End();
     }
@@ -446,6 +447,12 @@ int main(int argc, char** argv) {
     CHECK_EQ(ifx_paths.size(), ifx_threads.size());
   }
 
+  std::vector<int> priorities;
+  if (!FLAGS_priority.empty()) {
+    priorities = ParseStrToVec(FLAGS_priority);
+    CHECK_EQ(priorities.size(), ifx_paths.size());
+  }
+
   auto configs = ParseFlags(ifx_paths);
   int total_threads = 0;
   for (auto& t : ifx_threads) {
@@ -455,17 +462,29 @@ int main(int argc, char** argv) {
   std::vector<std::thread> threads(total_threads);
   Barrier barrier(total_threads);
   std::vector<std::vector<Ifx_Sess>> sessions;
+  std::vector<cudaStream_t> streams(configs.size());
   for (size_t i = 0; i < configs.size(); ++i) {
     std::vector<Ifx_Sess> tmp;
     for (size_t j = 0; j < configs[i].size(); ++j) {
       tmp.emplace_back(configs[i][j]);
     }
     sessions.emplace_back(tmp);
+
+    if (priorities.empty()) {
+      CHECK_EQ(cudaStreamCreate(&streams[i]), cudaSuccess);
+    } else {
+      int low_priority, high_priority;
+      CHECK_EQ(cudaDeviceGetStreamPriorityRange(&low_priority, &high_priority),
+               cudaSuccess);
+      CHECK_EQ(cudaStreamCreateWithPriority(&streams[i], cudaStreamNonBlocking,
+                                            priorities[i]),
+               cudaSuccess);
+    }
   }
 
   for (size_t i = 0; i < sessions.size(); ++i) {
     RunCascade(sessions[i], batches.empty() ? std::vector<int>{} : batches[i],
-               nullptr, FLAGS_warmup);
+               nullptr, streams.empty() ? nullptr : streams[i], FLAGS_warmup);
   }
 
   // LOG(INFO) << "Util gpu: " << nvml.GetNvmlStats().utilization.gpu;
@@ -481,7 +500,7 @@ int main(int argc, char** argv) {
       threads[thread_num++] = std::thread(
           RunCascade, std::ref(sessions[i]),
           batches.empty() ? std::vector<int>{} : batches[i], &barrier,
-          FLAGS_repeats);
+          streams.empty() ? nullptr : streams[i], FLAGS_repeats);
     }
   }
   for (size_t i = 0; i < threads.size(); ++i) {
