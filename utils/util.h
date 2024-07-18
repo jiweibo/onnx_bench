@@ -68,3 +68,13 @@ template <typename T> inline float mean(T* data, size_t n) {
   }
   return sum * 1. / n;
 }
+
+#define CUDA_CHECK(call)                                                       \
+  do {                                                                         \
+    cudaError_t err = call;                                                    \
+    if (err != cudaSuccess) {                                                  \
+      fprintf(stderr, "CUDA error at %s:%d code=%d(%s) \"%s\" \n", __FILE__,   \
+              __LINE__, err, cudaGetErrorName(err), cudaGetErrorString(err));  \
+      exit(EXIT_FAILURE);                                                      \
+    }                                                                          \
+  } while (0)
