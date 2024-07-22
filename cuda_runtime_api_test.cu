@@ -1,3 +1,4 @@
+#include <cstddef>
 #include <cuda_runtime_api.h>
 
 #include <future>
@@ -16,12 +17,50 @@ DEFINE_int32(size, 32 * 1024 * 1024, "memory size");
 DEFINE_int32(warmup, 0, "warmup");
 DEFINE_int32(repeats, 1, "repeats");
 DEFINE_bool(pin, false, "use pin memory, default is false");
-DEFINE_string(modes, "h2d d2h d2d run", "h2d d2h d2d run");
+DEFINE_string(modes, "h2d d2h d2d run",
+              "h2d d2h d2d run host_alloc malloc stream_create");
 
 namespace {
 
+void TestCreateStream(int repeats = 1, Barrier* barrier = nullptr) {
+  for (size_t i = 0; i < repeats; ++i) {
+    if (barrier) {
+      barrier->Wait();
+    }
+    cudaStream_t stream;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CUDA_CHECK(cudaStreamDestroy(stream));
+  }
+}
+
+void TestCudaMalloc(void* ptr, size_t size, int repeats = 1,
+                    Barrier* barrier = nullptr) {
+  for (size_t i = 0; i < repeats; ++i) {
+    if (barrier) {
+      barrier->Wait();
+    }
+    CUDA_CHECK(cudaMalloc(&ptr, size));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CUDA_CHECK(cudaFree(ptr));
+  }
+}
+
+void TestCudaHostAlloc(void* ptr, size_t size,
+                       unsigned int flags = cudaHostAllocDefault,
+                       int repeats = 1, Barrier* barrier = nullptr) {
+  for (size_t i = 0; i < repeats; ++i) {
+    if (barrier) {
+      barrier->Wait();
+    }
+    CUDA_CHECK(cudaHostAlloc(&ptr, size, flags));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CUDA_CHECK(cudaFreeHost(ptr));
+  }
+}
+
 void Copy(void* dst, const void* src, size_t size, cudaMemcpyKind kind,
-          cudaStream_t stream, Barrier* barrier, int repeats = 1) {
+          cudaStream_t stream, int repeats = 1, Barrier* barrier = nullptr) {
   for (size_t i = 0; i < repeats; ++i) {
     if (barrier) {
       barrier->Wait();
@@ -39,7 +78,7 @@ __global__ void func(float* device_data, size_t size) {
 }
 
 void RunKernel(float* device_data, size_t size, cudaStream_t stream,
-               Barrier* barrier, int repetas = 1) {
+               int repetas = 1, Barrier* barrier = nullptr) {
   dim3 threads_per_block = 512;
   dim3 blocks_per_grid = (size + threads_per_block.x - 1) / threads_per_block.x;
   for (size_t i = 0; i < repetas; ++i) {
@@ -89,13 +128,18 @@ int main(int argc, char** argv) {
   // warmup
   tp.enqueue([&]() {
       Copy(device_datas[0], host_datas[0], FLAGS_size, cudaMemcpyHostToDevice,
-           streams[0], nullptr, FLAGS_warmup);
+           streams[0], FLAGS_warmup);
       Copy(host_datas[0], device_datas[0], FLAGS_size, cudaMemcpyDeviceToHost,
-           streams[0], nullptr, FLAGS_warmup);
+           streams[0], FLAGS_warmup);
       Copy(device_datas2[0], device_datas[0], FLAGS_size,
-           cudaMemcpyDeviceToDevice, streams[0], nullptr, FLAGS_warmup);
+           cudaMemcpyDeviceToDevice, streams[0], FLAGS_warmup);
       RunKernel(device_datas[0], FLAGS_size / sizeof(float), streams[0],
-                nullptr, FLAGS_warmup);
+                FLAGS_warmup);
+      void* ptr;
+      TestCudaHostAlloc(&ptr, FLAGS_size, cudaHostAllocDefault, FLAGS_warmup);
+      void* dev_ptr;
+      TestCudaMalloc(&dev_ptr, FLAGS_size, FLAGS_warmup);
+      TestCreateStream(FLAGS_warmup);
     }).get();
   LOG(INFO) << "Warmup done.";
 
@@ -109,23 +153,35 @@ int main(int argc, char** argv) {
             dst = device_datas[idx];
             src = host_datas[idx];
             kind = cudaMemcpyHostToDevice;
+            Copy(dst, src, FLAGS_size, kind, streams[idx], FLAGS_repeats,
+                 &barrier);
           } else if (modes[idx] == "d2h") {
             dst = host_datas[idx];
             src = device_datas[idx];
             kind = cudaMemcpyDeviceToHost;
+            Copy(dst, src, FLAGS_size, kind, streams[idx], FLAGS_repeats,
+                 &barrier);
           } else if (modes[idx] == "d2d") {
             dst = device_datas[idx];
             src = device_datas[idx];
             kind = cudaMemcpyDeviceToDevice;
+            Copy(dst, src, FLAGS_size, kind, streams[idx], FLAGS_repeats,
+                 &barrier);
           } else if (modes[idx] == "run") {
             RunKernel(device_datas[idx], FLAGS_size / sizeof(float),
-                      streams[idx], &barrier, FLAGS_repeats);
-            return;
+                      streams[idx], FLAGS_repeats, &barrier);
+          } else if (modes[idx] == "host_alloc") {
+            void* ptr;
+            TestCudaHostAlloc(&ptr, FLAGS_size, cudaHostAllocDefault,
+                              FLAGS_repeats, &barrier);
+          } else if (modes[idx] == "malloc") {
+            void* ptr;
+            TestCudaMalloc(ptr, FLAGS_size, FLAGS_repeats, &barrier);
+          } else if (modes[idx] == "stream_create") {
+            TestCreateStream(FLAGS_repeats, &barrier);
           } else {
             LOG(FATAL) << "Not supported mode: " << modes[idx];
           }
-          Copy(dst, src, FLAGS_size, kind, streams[idx], &barrier,
-               FLAGS_repeats);
         },
         i);
   }

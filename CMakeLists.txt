@@ -46,5 +46,5 @@ add_executable(test_dataset dataset_test.cc)
 target_link_libraries(test_dataset jsoncpp)
 target_link_libraries(test_dataset ${DEPS})
 
-add_executable(memcpy_test memcpy_test.cu)
-target_link_libraries(memcpy_test ${DEPS})
+add_executable(cuda_runtime_api_test cuda_runtime_api_test.cu)
+target_link_libraries(cuda_runtime_api_test ${DEPS})
