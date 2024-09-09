@@ -47,22 +47,19 @@ DEFINE_string(cacheDir, "", "the cache dir");
 DEFINE_string(calibrationName, "", "int8 calibration table");
 DEFINE_int32(minSubgraphSize, 1, "trt min subgraph size");
 DEFINE_uint64(maxWorkspaceSize, 1UL << 31, "trt max workspace size");
-DEFINE_string(
-    dumpOutput, "",
-    "Save the output tensor(s) of the last inference iteration in a npz file"
-    "(default = disabled).");
-DEFINE_string(trtFilterOps, "",
-              "defaule empty, e.g. 'Flatten_125 Flatten_126'");
+DEFINE_string(dumpOutput, "",
+              "Save the output tensor(s) of the last inference iteration in a npz file"
+              "(default = disabled).");
+DEFINE_string(trtFilterOps, "", "defaule empty, e.g. 'Flatten_125 Flatten_126'");
 DEFINE_string(trtPreferPrecisionOps, "", "prefer fp32 ops");
 DEFINE_string(trtPreferPrecisionNodes, "", "prefer fp32 nodes");
 DEFINE_string(trtForcePrecisionOps, "", "force ops");
 DEFINE_string(trtForcePrecisionNodes, "", "force nodes");
 
-DEFINE_string(
-    loadInputs, "",
-    "Load input values from files (default = generate random inputs). Input "
-    "names can be wrapped with single quotes (ex: "
-    "'Input0:a.npy,Input1:b.npy')");
+DEFINE_string(loadInputs, "",
+              "Load input values from files (default = generate random inputs). Input "
+              "names can be wrapped with single quotes (ex: "
+              "'Input0:a.npy,Input1:b.npy')");
 DEFINE_string(inputType, "npz", "npz, npy, txt, bin, json etc.");
 
 DEFINE_string(dataDir, "", "a dir which stores lots of json file");
@@ -71,10 +68,8 @@ std::default_random_engine e(1998);
 
 namespace {
 
-void* GenerateData(const std::vector<int64_t>& dims,
-                   ONNXTensorElementDataType type) {
-  int64_t num =
-      std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int64_t>());
+void* GenerateData(const std::vector<int64_t>& dims, ONNXTensorElementDataType type) {
+  int64_t num = std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int64_t>());
   if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     float* ptr = static_cast<float*>(malloc(num * sizeof(float)));
     std::uniform_real_distribution<float> u(-1, 1);
@@ -149,8 +144,7 @@ float MeanValue(const Ort::Value& tensor) {
   auto type_info = tensor.GetTensorTypeAndShapeInfo();
   auto type = type_info.GetElementType();
   auto dims = type_info.GetShape();
-  size_t num =
-      std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
+  size_t num = std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
   if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     auto* data = tensor.GetTensorData<float>();
     return mean(data, num);
@@ -171,8 +165,7 @@ float MeanValue(const Ort::Value& tensor) {
   }
 }
 
-void DumpTensors(const std::vector<Ort::Value>& tensors,
-                 const std::vector<std::string>& names,
+void DumpTensors(const std::vector<Ort::Value>& tensors, const std::vector<std::string>& names,
                  const std::string& filename) {
   CHECK_EQ(tensors.size(), names.size());
   for (size_t i = 0; i < tensors.size(); ++i) {
@@ -185,8 +178,7 @@ void DumpTensors(const std::vector<Ort::Value>& tensors,
     auto type_info = tensor.GetTensorTypeAndShapeInfo();
     auto type = type_info.GetElementType();
     auto dims = type_info.GetShape();
-    size_t num =
-        std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
+    size_t num = std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
     if (num == 0) {
       continue;
     }
@@ -233,9 +225,7 @@ SessConfig ParseFlags() {
   } else if (FLAGS_log_level == "fatal") {
     config.log_level = ORT_LOGGING_LEVEL_FATAL;
   } else {
-    LOG(FATAL)
-        << "Not supported log level(verbose, info, warning, error, fatal) "
-        << FLAGS_log_level;
+    LOG(FATAL) << "Not supported log level(verbose, info, warning, error, fatal) " << FLAGS_log_level;
   }
   if (FLAGS_provider == "trt") {
     config.use_trt = true;
@@ -459,16 +449,12 @@ void PrintSessInfo(Sess& session) {
   int num_output_nodes = output_names.size();
 
   for (size_t i = 0; i < num_input_nodes; ++i) {
-    LOG(INFO) << "Input " << i << " : name = " << input_names[i]
-              << ", type = " << input_types[i]
-              << ", num_dims = " << input_dims[i].size()
-              << ", dims = " << PrintShape(input_dims[i]);
+    LOG(INFO) << "Input " << i << " : name = " << input_names[i] << ", type = " << input_types[i]
+              << ", num_dims = " << input_dims[i].size() << ", dims = " << GetShapeStr(input_dims[i]);
   }
   for (size_t i = 0; i < num_output_nodes; ++i) {
-    LOG(INFO) << "Output " << i << " : name = " << output_names[i]
-              << ", type = " << output_types[i]
-              << ", num_dims = " << output_dims[i].size()
-              << ", dims = " << PrintShape(output_dims[i]);
+    LOG(INFO) << "Output " << i << " : name = " << output_names[i] << ", type = " << output_types[i]
+              << ", num_dims = " << output_dims[i].size() << ", dims = " << GetShapeStr(output_dims[i]);
   }
 }
 
@@ -511,8 +497,7 @@ int main(int argc, char** argv) {
     }
     void* data = GenerateData(input_dims[i], session.InputDtypes()[i]);
     to_free[i] = data;
-    inputs.emplace(name,
-                   Tensor(name, data, input_dims[i], input_types[i], false));
+    inputs.emplace(name, Tensor(name, data, input_dims[i], input_types[i], false));
   }
   MemoryUse memuse(FLAGS_device_id);
   memuse.Start();
@@ -524,14 +509,11 @@ int main(int argc, char** argv) {
     free(p);
 
   LOG(INFO) << "------------------------------";
-  LOG(INFO) << "H2D Average time " << timer_h2d.GetAverageTime()
-            << ", variance: " << timer_h2d.ComputeVariance()
+  LOG(INFO) << "H2D Average time " << timer_h2d.GetAverageTime() << ", variance: " << timer_h2d.ComputeVariance()
             << ", tp99: " << timer_h2d.ComputePercentile(0.99);
   LOG(INFO) << "Run+D2H Average time " << timer_run_d2h.GetAverageTime()
-            << ", variance: " << timer_run_d2h.ComputeVariance()
-            << ", tp99: " << timer_run_d2h.ComputePercentile(0.99);
-  LOG(INFO) << "H2D+RUN+D2H time "
-            << timer_h2d.GetAverageTime() + timer_run_d2h.GetAverageTime();
+            << ", variance: " << timer_run_d2h.ComputeVariance() << ", tp99: " << timer_run_d2h.ComputePercentile(0.99);
+  LOG(INFO) << "H2D+RUN+D2H time " << timer_h2d.GetAverageTime() + timer_run_d2h.GetAverageTime();
 
   auto [vss, rss, gpu_mem] = memuse.GetMemInfo();
   memuse.Stop();

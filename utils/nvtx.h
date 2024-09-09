@@ -17,10 +17,10 @@ public:
     eventAttrib.messageType = NVTX_MESSAGE_TYPE_ASCII;
     eventAttrib.message.ascii = message_.c_str();
 
-    range_id_ = nvtxRangeStartEx(&eventAttrib);
+    nvtxRangePushEx(&eventAttrib);
   }
 
-  void End() { nvtxRangeEnd(range_id_); }
+  void End() { nvtxRangePop(); }
 
 private:
   uint64_t range_id_;

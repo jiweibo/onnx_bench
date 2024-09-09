@@ -4,13 +4,11 @@ project(onnx_bench CXX CUDA)
 
 include(cmake/third_party.cmake)
 
-# find_package(CUDA REQUIRED)
-
 set(ORT_DIR "/usr" CACHE PATH "onnxruntime root dir")
+set(IFX_DIR "/usr/local/ifx" CACHE PATH "ifxruntime dir")
+set(TENSORRT_DIR "/usr/local/TensorRT" CACHE PATH "tensorrt root dir")
 
 include_directories(${CMAKE_SOURCE_DIR})
-
-include_directories(/usr/include/ifx)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_ARCHITECTURES "75;86")
@@ -22,8 +20,14 @@ link_directories("/usr/local/cuda/lib64")
 include_directories("${ORT_DIR}/include")
 link_directories("${ORT_DIR}/lib")
 
+include_directories("${IFX_DIR}/include")
+link_directories("${IFX_DIR}/lib")
+
+include_directories("${TENSORRT_DIR}/include")
+link_directories("${TENSORRT_DIR}/lib")
+
 add_executable(onnx_bench main.cc)
-set(DEPS glog gflags pthread cudart nvToolsExt cnpy jsoncpp z nvidia-ml)
+set(DEPS glog gflags pthread dl cudart nvToolsExt cnpy jsoncpp z nvidia-ml cupti)
 target_link_libraries(onnx_bench onnxruntime)
 target_link_libraries(onnx_bench ${DEPS})
 
@@ -31,15 +35,10 @@ add_executable(demo simple_demo.cc)
 target_link_libraries(demo onnxruntime)
 target_link_libraries(demo ${DEPS})
 
-# add_executable(onnx_bench2 main2.cc)
-# target_link_libraries(onnx_bench2 onnxruntime)
-# target_link_libraries(onnx_bench2 ${DEPS})
-
 # To use old nvml lib, we need the macro
 add_definitions(-DNVML_NO_UNVERSIONED_FUNC_DEFS)
-
 add_executable(ifx_bench ifx_main.cc)
-target_link_libraries(ifx_bench ifx cublas)
+target_link_libraries(ifx_bench ifx cublas cuda nvperf_host nvperf_target nvinfer)
 target_link_libraries(ifx_bench ${DEPS})
 
 add_executable(test_dataset dataset_test.cc)
@@ -48,3 +47,7 @@ target_link_libraries(test_dataset ${DEPS})
 
 add_executable(cuda_runtime_api_test cuda_runtime_api_test.cu)
 target_link_libraries(cuda_runtime_api_test ${DEPS})
+
+add_subdirectory(trt)
+
+add_subdirectory(test)

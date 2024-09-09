@@ -39,3 +39,5 @@ compile_commands.json
 
 __pycache__*/
 *_pb2.py
+
+*.onnx

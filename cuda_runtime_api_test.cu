@@ -3,6 +3,7 @@
 
 #include <future>
 #include <iostream>
+#include <random>
 #include <thread>
 
 #include "thread_pool.h"
@@ -18,31 +19,70 @@ DEFINE_int32(warmup, 0, "warmup");
 DEFINE_int32(repeats, 1, "repeats");
 DEFINE_bool(pin, false, "use pin memory, default is false");
 DEFINE_string(modes, "h2d d2h d2d run",
-              "h2d d2h d2d run host_alloc malloc stream_create");
+              "h2d d2h d2d run host_alloc malloc malloc_async stream_create "
+              "memset memset_async");
+DEFINE_int32(wait_min, 0, "random wait time(ms) min");
+DEFINE_int32(wait_max, 0, "random wait time(ms) max");
+DEFINE_uint64(size_min, 1, "random size min");
+DEFINE_uint64(size_max, 32 * 1024 * 1024, "random size max");
 
 namespace {
+
+std::default_random_engine e(19980);
+std::uniform_int_distribution<> dis(FLAGS_wait_min, FLAGS_wait_max);
+std::uniform_int_distribution<> size_dis(FLAGS_size_min, FLAGS_size_max);
 
 void TestCreateStream(int repeats = 1, Barrier* barrier = nullptr) {
   for (size_t i = 0; i < repeats; ++i) {
     if (barrier) {
       barrier->Wait();
+      std::this_thread::sleep_for(std::chrono::milliseconds(dis(e)));
     }
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreate(&stream));
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
     CUDA_CHECK(cudaStreamDestroy(stream));
   }
 }
 
-void TestCudaMalloc(void* ptr, size_t size, int repeats = 1,
+void TestCudaMalloc(void* ptr, size_t size, bool async = false,
+                    cudaStream_t stream = nullptr, int repeats = 1,
                     Barrier* barrier = nullptr) {
   for (size_t i = 0; i < repeats; ++i) {
     if (barrier) {
       barrier->Wait();
+      std::this_thread::sleep_for(std::chrono::milliseconds(dis(e)));
     }
-    CUDA_CHECK(cudaMalloc(&ptr, size));
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    CUDA_CHECK(cudaFree(ptr));
+    if (async) {
+      CUDA_CHECK(cudaMallocAsync(&ptr, size_dis(e), stream));
+      CUDA_CHECK(cudaStreamSynchronize(stream));
+      std::this_thread::sleep_for(std::chrono::milliseconds(dis(e)));
+      CUDA_CHECK(cudaFreeAsync(ptr, stream));
+      CUDA_CHECK(cudaStreamSynchronize(stream));
+    } else {
+      CUDA_CHECK(cudaMalloc(&ptr, size_dis(e)));
+      std::this_thread::sleep_for(std::chrono::milliseconds(dis(e)));
+      CUDA_CHECK(cudaFree(ptr));
+    }
+  }
+}
+
+void TestCudaMemset(void* ptr, size_t size, bool async = false,
+                    cudaStream_t stream = nullptr, int repeats = 1,
+                    Barrier* barrier = nullptr) {
+  for (size_t i = 0; i < repeats; ++i) {
+    if (barrier) {
+      barrier->Wait();
+      std::this_thread::sleep_for(std::chrono::milliseconds(dis(e)));
+    }
+    if (async) {
+      CUDA_CHECK(cudaMemsetAsync(ptr, 0, size, stream));
+      CUDA_CHECK(cudaStreamSynchronize(stream));
+      std::this_thread::sleep_for(std::chrono::milliseconds(dis(e)));
+    } else {
+      CUDA_CHECK(cudaMemset(ptr, 0, size));
+      std::this_thread::sleep_for(std::chrono::milliseconds(dis(e)));
+    }
   }
 }
 
@@ -52,9 +92,10 @@ void TestCudaHostAlloc(void* ptr, size_t size,
   for (size_t i = 0; i < repeats; ++i) {
     if (barrier) {
       barrier->Wait();
+      std::this_thread::sleep_for(std::chrono::milliseconds(dis(e)));
     }
     CUDA_CHECK(cudaHostAlloc(&ptr, size, flags));
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
     CUDA_CHECK(cudaFreeHost(ptr));
   }
 }
@@ -64,6 +105,7 @@ void Copy(void* dst, const void* src, size_t size, cudaMemcpyKind kind,
   for (size_t i = 0; i < repeats; ++i) {
     if (barrier) {
       barrier->Wait();
+      std::this_thread::sleep_for(std::chrono::milliseconds(dis(e)));
     }
     CUDA_CHECK(cudaMemcpyAsync(dst, src, size, kind, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -84,6 +126,7 @@ void RunKernel(float* device_data, size_t size, cudaStream_t stream,
   for (size_t i = 0; i < repetas; ++i) {
     if (barrier) {
       barrier->Wait();
+      std::this_thread::sleep_for(std::chrono::milliseconds(dis(e)));
     }
     func<<<blocks_per_grid, threads_per_block, 0, stream>>>(device_data, size);
     CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -139,7 +182,10 @@ int main(int argc, char** argv) {
       TestCudaHostAlloc(&ptr, FLAGS_size, cudaHostAllocDefault, FLAGS_warmup);
       void* dev_ptr;
       TestCudaMalloc(&dev_ptr, FLAGS_size, FLAGS_warmup);
+      TestCudaMalloc(&dev_ptr, FLAGS_size, true, streams[0], FLAGS_warmup);
       TestCreateStream(FLAGS_warmup);
+      TestCudaMemset(device_datas[0], FLAGS_size, false, nullptr, FLAGS_warmup);
+      TestCudaMemset(device_datas[0], FLAGS_size, true, nullptr, FLAGS_warmup);
     }).get();
   LOG(INFO) << "Warmup done.";
 
@@ -176,7 +222,18 @@ int main(int argc, char** argv) {
                               FLAGS_repeats, &barrier);
           } else if (modes[idx] == "malloc") {
             void* ptr;
-            TestCudaMalloc(ptr, FLAGS_size, FLAGS_repeats, &barrier);
+            TestCudaMalloc(ptr, FLAGS_size, false, nullptr, FLAGS_repeats,
+                           &barrier);
+          } else if (modes[idx] == "malloc_async") {
+            void* ptr;
+            TestCudaMalloc(ptr, FLAGS_size, true, streams[idx], FLAGS_repeats,
+                           &barrier);
+          } else if (modes[idx] == "memset") {
+            TestCudaMemset(device_datas[idx], FLAGS_size, false, nullptr,
+                           FLAGS_repeats, &barrier);
+          } else if (modes[idx] == "memset_async") {
+            TestCudaMemset(device_datas[idx], FLAGS_size, true, nullptr,
+                           FLAGS_repeats, &barrier);
           } else if (modes[idx] == "stream_create") {
             TestCreateStream(FLAGS_repeats, &barrier);
           } else {

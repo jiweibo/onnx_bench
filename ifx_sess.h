@@ -1,6 +1,9 @@
 #pragma once
 #include "ifx/ifx.h"
+#include "utils/cuda_graph.h"
+#include "utils/util.h"
 
+#include <chrono>
 #include <cstddef>
 #include <functional>
 
@@ -17,6 +20,16 @@ struct SessConfig {
   std::string cache_dir;
   bool use_gpu;
   bool enable_fp16;
+};
+
+class IfxAllocator : public ifx::IExternalAllocator {
+public:
+  void* allocate(size_t size) override {
+    void* data_ptr = nullptr;
+    CUDA_CHECK(cudaMallocHost(&data_ptr, size));
+    return data_ptr;
+  }
+  void deallocate(void* ptr, size_t) override { CUDA_CHECK(cudaFreeHost(ptr)); }
 };
 
 inline std::vector<int64_t> GetShape(const ifx::IONode& node) {
@@ -74,17 +87,13 @@ inline std::vector<int64_t> GetShape(const ifx::IONode& node) {
 
 class Tensor {
 public:
-  explicit Tensor(const std::string& name, void* data,
-                  std::vector<int32_t> dims, ifx::DataType dtype,
+  explicit Tensor(const std::string& name, void* data, std::vector<int32_t> dims, ifx::DataType dtype,
                   ifx::TensorFormat data_format, bool on_gpu)
-      : name(name), data(data), dims(dims), dtype(dtype),
-        data_format(data_format), on_gpu(on_gpu) {
+      : name(name), data(data), dims(dims), dtype(dtype), data_format(data_format), on_gpu(on_gpu) {
     if (on_gpu) {
-      ifx_tensor_ = ifx::Tensor::create(ifx::DeviceType::DEVICE_TYPE_CUDA, dims,
-                                        data_format, dtype, data);
+      ifx_tensor_ = ifx::Tensor::create(ifx::DeviceType::DEVICE_TYPE_CUDA, dims, data_format, dtype, data);
     } else {
-      ifx_tensor_ = ifx::Tensor::create(ifx::DeviceType::DEVICE_TYPE_NATIVE,
-                                        dims, data_format, dtype, data);
+      ifx_tensor_ = ifx::Tensor::create(ifx::DeviceType::DEVICE_TYPE_NATIVE, dims, data_format, dtype, data);
     }
   }
 
@@ -95,8 +104,7 @@ public:
     }
   }
 
-  explicit Tensor(const std::string& name, ifx::Tensor* ifx_tensor)
-      : name(name), ifx_tensor_(ifx_tensor) {
+  explicit Tensor(const std::string& name, ifx::Tensor* ifx_tensor) : name(name), ifx_tensor_(ifx_tensor) {
     dims = ifx_tensor->getDims();
     dtype = ifx_tensor->getDataType();
     data_format = ifx_tensor->getFormat();
@@ -145,10 +153,12 @@ private:
 
 class Ifx_Sess {
 public:
-  Ifx_Sess(const SessConfig& cfg) : config_(cfg) { InitSession(); }
+  Ifx_Sess(const SessConfig& cfg) : config_(cfg) {
+    LOG(INFO) << "Ifx_Sess this is " << this;
+    InitSession();
+  }
 
-  std::map<std::string, Tensor>
-  Run(const std::map<std::string, Tensor>& in_tensors, cudaStream_t stream = nullptr) {
+  std::map<std::string, Tensor> Run(const std::map<std::string, Tensor>& in_tensors, cudaStream_t stream = nullptr) {
     std::map<std::string, ifx::Tensor*> input_ifx_tensors;
     std::map<std::string, ifx::Tensor*> output_ifx_tensors;
 
@@ -162,23 +172,29 @@ public:
     }
 
     for (size_t i = 0; i < out_cnt_; ++i) {
-      output_ifx_tensors.emplace(
-          std::make_pair(output_names_[i], ifx::Tensor::create()));
+      output_ifx_tensors.emplace(std::make_pair(output_names_[i], ifx::Tensor::create(&allocator_)));
     }
 
     for (auto& hook : before_run_d2h_hook_)
       hook();
     int err;
-    if (stream != nullptr) {
-      err = sess_->doInference(input_ifx_tensors, output_ifx_tensors, &stream);
-      CHECK_EQ(cudaStreamSynchronize(stream),
-               cudaSuccess);
-    } else {
-      err = sess_->doInference(input_ifx_tensors, output_ifx_tensors);
+    try {
+      if (stream != nullptr) {
+        err = sess_->doInference(input_ifx_tensors, output_ifx_tensors, &stream);
+        CHECK_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+      } else {
+        err = sess_->doInference(input_ifx_tensors, output_ifx_tensors);
+      }
+    } catch (const ifx::IfxException& e) {
+      LOG(FATAL) << "IFX Exception Occured: " << e.what();
+    } catch (const std::exception& e) {
+      LOG(FATAL) << "STD Exception Occured: " << e.what();
+    } catch (...) {
+      LOG(FATAL) << "Unknown Exception Occured.";
     }
+
     for (auto& hook : after_run_d2h_hook_)
       hook();
-    CHECK(err == 0);
 
     std::map<std::string, Tensor> res;
     for (size_t i = 0; i < output_names_.size(); ++i) {
@@ -190,33 +206,17 @@ public:
 
   const std::vector<std::string>& InputNames() { return input_names_; }
   const std::vector<std::string>& OutputNames() { return output_names_; }
-  const std::vector<std::vector<int64_t>>& InputDims() {
-    return input_node_dims_;
-  }
-  const std::vector<std::vector<int64_t>>& OutputDims() {
-    return output_node_dims_;
-  }
+  const std::vector<std::vector<int64_t>>& InputDims() { return input_node_dims_; }
+  const std::vector<std::vector<int64_t>>& OutputDims() { return output_node_dims_; }
   const std::vector<ifx::DataType>& InputDtypes() { return input_types_; }
   const std::vector<ifx::DataType>& OutputDtypes() { return output_types_; }
-  const std::vector<ifx::TensorFormat>& InputFormats() {
-    return input_formats_;
-  }
-  const std::vector<ifx::TensorFormat>& OutputFormats() {
-    return output_formats_;
-  }
+  const std::vector<ifx::TensorFormat>& InputFormats() { return input_formats_; }
+  const std::vector<ifx::TensorFormat>& OutputFormats() { return output_formats_; }
 
-  void RegisterBeforeH2DHook(std::function<void(void)> func) {
-    before_h2d_hook_.emplace_back(func);
-  }
-  void RegisterAfterH2DHook(std::function<void(void)> func) {
-    after_h2d_hook_.emplace_back(func);
-  }
-  void RegisterBeforeRunD2HHook(std::function<void(void)> func) {
-    before_run_d2h_hook_.emplace_back(func);
-  }
-  void RegisterAfterRunD2HHook(std::function<void(void)> func) {
-    after_run_d2h_hook_.emplace_back(func);
-  }
+  void RegisterBeforeH2DHook(std::function<void(void)> func) { before_h2d_hook_.emplace_back(func); }
+  void RegisterAfterH2DHook(std::function<void(void)> func) { after_h2d_hook_.emplace_back(func); }
+  void RegisterBeforeRunD2HHook(std::function<void(void)> func) { before_run_d2h_hook_.emplace_back(func); }
+  void RegisterAfterRunD2HHook(std::function<void(void)> func) { after_run_d2h_hook_.emplace_back(func); }
 
   SessConfig Config() { return config_; }
 
@@ -235,10 +235,8 @@ private:
 
     graph_ = ifx::Graph::create(ifx_options);
 
-    CHECK_EQ(graph_->loadIfxEncryptModel(config_.ifx_file.c_str(), inputs_,
-                                         outputs_),
-             0)
-        << "IFX load model failed" << config_.ifx_file;
+    CHECK_EQ(graph_->loadIfxEncryptModel(config_.ifx_file.c_str(), inputs_, outputs_), 0)
+        << "IFX load model failed " << config_.ifx_file;
     sess_ = graph_->createSession();
 
     in_cnt_ = inputs_.size();
@@ -268,6 +266,11 @@ private:
   }
 
 private:
+  Ifx_Sess(const Ifx_Sess&) = delete;
+  Ifx_Sess& operator=(const Ifx_Sess&) = delete;
+
+  IfxAllocator allocator_;
+
   SessConfig config_;
   std::vector<ifx::IONode> inputs_;
   std::vector<ifx::IONode> outputs_;
