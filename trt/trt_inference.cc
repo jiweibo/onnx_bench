@@ -54,7 +54,7 @@ public:
   using BindingsVector = std::vector<std::unique_ptr<Bindings>>;
   FillBindingClosure(const ICudaEngine* engine, const IExecutionContext* context, BindingsVector& bindings,
                      int32_t batch, int32_t endBindingIndex, int32_t profileIndex)
-      : engine(engine), context(context), bindings(bindings), batch(batch), endBindingIndex(endBindingIndex),
+      : engine(engine), context(context), bindingsVec(bindings), batch(batch), endBindingIndex(endBindingIndex),
         profileIndex(profileIndex) {}
 
   bool operator()() { return fillAllBindings(batch, endBindingIndex); }
@@ -77,7 +77,7 @@ private:
   void fillOneBinding(const TensorInfo& tensorInfo) {
     const auto name = tensorInfo.name;
     const auto* bindingInOutStr = tensorInfo.isInput ? "Input" : "Output";
-    for (auto& binding : bindings) {
+    for (auto& bindings : bindingsVec) {
       if (tensorInfo.isInput) {
         LOG(INFO) << "Using random values for input " << name;
       }
@@ -87,7 +87,7 @@ private:
       } else {
         LOG(INFO) << bindingInOutStr << " binding for " << name << " with dimensions " << getDimsStr(tensorInfo.dims);
       }
-      binding->addBinding(tensorInfo);
+      bindings->addBinding(tensorInfo);
     }
   }
 
@@ -104,12 +104,11 @@ private:
 
   const ICudaEngine* engine;
   const IExecutionContext* context;
-  BindingsVector& bindings;
+  BindingsVector& bindingsVec;
   int32_t batch;
   int32_t endBindingIndex;
   int32_t profileIndex;
 };
-
 } // namespace
 
 void Binding::fill() {
@@ -244,7 +243,9 @@ bool setUpInference(InferenceEnvironment& iEnv, InferenceOptions const& inferenc
     return false;
   }
 
-  // if (nbOptProfiles > 1 && !inference.setOptProfile)
+  if (nbOptProfiles > 1 && !inference.setOptProfile) {
+    LOG(WARNING) << nbOptProfiles << " profiles detected but not set. Running with profile 0.";
+  }
 
   for (int32_t s = 0; s < inference.infStream; ++s) {
     IExecutionContext* ec{nullptr};
@@ -263,6 +264,14 @@ bool setUpInference(InferenceEnvironment& iEnv, InferenceOptions const& inferenc
     iEnv.contexts.emplace_back(ec);
     iEnv.bindings.emplace_back(new Bindings(useManagedMemory));
   }
+
+  // TODO(wilber): add debug tensor support.
+
+  if (!allocateContextMemory(iEnv, inference)) {
+    return false;
+  }
+
+  // return true;
 
   const int32_t endBindingIndex = engine->getNbIOTensors();
 
@@ -332,12 +341,6 @@ bool setUpInference(InferenceEnvironment& iEnv, InferenceOptions const& inferenc
         }
       }
     }
-  }
-
-  // TODO: add debug tensor support.
-
-  if (!allocateContextMemory(iEnv, inference)) {
-    return false;
   }
 
   const auto* context = iEnv.contexts.front().get();

@@ -4,11 +4,14 @@
 #include <exception>
 #include <functional>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <sys/types.h>
 #include <utility>
 #include <vector>
+
+#include "core/core.h"
 
 #include "onnxruntime/core/providers/tensorrt/tensorrt_provider_options.h"
 #include "onnxruntime/core/session/onnxruntime_c_api.h"
@@ -77,147 +80,254 @@ inline size_t SizeOf(ONNXTensorElementDataType dtype) {
   }
 }
 
-class Tensor {
-public:
-  explicit Tensor(const std::string& name, void* data,
-                  std::vector<int64_t> dims, ONNXTensorElementDataType dtype,
-                  bool on_gpu)
-      : name(name), data(data), dims(dims), dtype(dtype), on_gpu(on_gpu) {}
+inline core::DataType ToDataType(ONNXTensorElementDataType dtype) {
+  switch (dtype) {
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+    return core::DataType::kBOOL;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+    return core::DataType::kINT8;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+    return core::DataType::kUINT8;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+    return core::DataType::kHALF;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+    return core::DataType::kBF16;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+    return core::DataType::kINT32;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+    return core::DataType::kINT64;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+    return core::DataType::kFLOAT;
 
-  explicit Tensor(const std::string& name, Ort::Value&& v)
-      : name(name), ort_val_(std::move(v)) {
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX64:
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX128:
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+  default:
+    LOG(FATAL) << "Not supported dtype " << static_cast<int32_t>(dtype);
+    return core::DataType::kFLOAT;
+  };
+}
+
+inline ONNXTensorElementDataType ToDataType(core::DataType dtype) {
+  switch (dtype) {
+  case core::DataType::kBOOL:
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
+  case core::DataType::kINT8:
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
+  case core::DataType::kUINT8:
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+  case core::DataType::kHALF:
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+  case core::DataType::kBF16:
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+  case core::DataType::kINT32:
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+  case core::DataType::kINT64:
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+  case core::DataType::kFLOAT:
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+  default:
+    LOG(FATAL) << "Not supported dtype " << static_cast<int32_t>(dtype);
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+  };
+}
+
+class OrtTensor : public core::Tensor {
+public:
+  explicit OrtTensor(Ort::Value&& val) : ort_val_(std::move(val)) {
     if (!ort_val_.IsTensor()) {
-      LOG(FATAL) << name << " is not Tensor";
+      LOG(FATAL) << "ort_val is not Tensor";
     }
     auto info = ort_val_.GetTensorTypeAndShapeInfo();
-    dims = info.GetShape();
-    dtype = info.GetElementType();
-    on_gpu = ort_val_.GetLocation().GetAllocatorName() == "Cuda";
-    if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) { // maps to c type float
-      data = ort_val_.GetTensorMutableData<float>();
-    } else if (dtype ==
-               ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) { // maps to c type uint8_t
-      data = ort_val_.GetTensorMutableData<uint8_t>();
-    } else if (dtype ==
-               ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8) { // maps to c type int8_t
-      data = ort_val_.GetTensorMutableData<int8_t>();
-    } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16) { // maps to c
-                                                                // type uint16_t
-      data = ort_val_.GetTensorMutableData<uint16_t>();
-    } else if (dtype ==
-               ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16) { // maps to c type int16_t
-      data = ort_val_.GetTensorMutableData<int16_t>();
-    } else if (dtype ==
-               ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) { // maps to c type int32_t
-      data = ort_val_.GetTensorMutableData<int32_t>();
-    } else if (dtype ==
-               ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) { // maps to c type int64_t
-      data = ort_val_.GetTensorMutableData<int64_t>();
-    } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
-      data = ort_val_.GetTensorMutableData<bool>();
-    } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-      data = ort_val_.GetTensorMutableData<__half>();
-    } else if (dtype ==
-               ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE) { // maps to c type double
-      data = ort_val_.GetTensorMutableData<double>();
-    } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32) { // maps to c
-                                                                // type uint32_t
-      data = ort_val_.GetTensorMutableData<uint32_t>();
-    } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64) { // maps to c
-                                                                // type uint64_t
-      data = ort_val_.GetTensorMutableData<uint64_t>();
-    } else if (dtype ==
-               ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) { // Non-IEEE
-                                                         // floating-point
-                                                         // format based on
-                                                         // IEEE754
-                                                         // single-precision
-      data = ort_val_.GetTensorMutableData<uint16_t>();
+    dims_ = info.GetShape();
+    dtype_ = ToDataType(info.GetElementType());
+    location_ = ort_val_.GetLocation().GetAllocatorName() == "Cuda" ? core::Location::kDEVICE : core::Location::kHOST;
+    external_size_ = dims_.Numel() * core::DataTypeSize(dtype_);
+    if (dtype_ == core::DataType::kFLOAT) { // maps to c type float
+      if (location_ == core::Location::kDEVICE) {
+        external_device_data_ = ort_val_.GetTensorMutableData<float>();
+      } else {
+        external_host_data_ = ort_val_.GetTensorMutableData<float>();
+      }
+    } else if (dtype_ == core::DataType::kUINT8) { // maps to c type uint8_t
+      if (location_ == core::Location::kDEVICE) {
+        external_device_data_ = ort_val_.GetTensorMutableData<uint8_t>();
+      } else {
+        external_host_data_ = ort_val_.GetTensorMutableData<uint8_t>();
+      }
+    } else if (dtype_ == core::DataType::kINT8) { // maps to c type int8_t
+      if (location_ == core::Location::kDEVICE) {
+        external_device_data_ = ort_val_.GetTensorMutableData<int8_t>();
+      } else {
+        external_host_data_ = ort_val_.GetTensorMutableData<int8_t>();
+      }
+    } else if (dtype_ == core::DataType::kINT32) { // maps to c type int32_t
+      if (location_ == core::Location::kDEVICE) {
+        external_device_data_ = ort_val_.GetTensorMutableData<int32_t>();
+      } else {
+        external_host_data_ = ort_val_.GetTensorMutableData<int32_t>();
+      }
+    } else if (dtype_ == core::DataType::kINT64) { // maps to c type int64_t
+      if (location_ == core::Location::kDEVICE) {
+        external_device_data_ = ort_val_.GetTensorMutableData<int64_t>();
+      } else {
+        external_host_data_ = ort_val_.GetTensorMutableData<int64_t>();
+      }
+    } else if (dtype_ == core::DataType::kBOOL) { // maps to c type bool
+      if (location_ == core::Location::kDEVICE) {
+        external_device_data_ = ort_val_.GetTensorMutableData<bool>();
+      } else {
+        external_host_data_ = ort_val_.GetTensorMutableData<bool>();
+      }
+    } else if (dtype_ == core::DataType::kHALF) { // maps to c type bool
+      if (location_ == core::Location::kDEVICE) {
+        external_device_data_ = ort_val_.GetTensorMutableData<__half>();
+      } else {
+        external_host_data_ = ort_val_.GetTensorMutableData<__half>();
+      }
+    } else if (dtype_ == core::DataType::kBF16) { // Non-IEEE
+                                                  // floating-point
+                                                  // format based on
+                                                  // IEEE754
+                                                  // single-precision
+      if (location_ == core::Location::kDEVICE) {
+        external_device_data_ = ort_val_.GetTensorMutableData<uint16_t>();
+      } else {
+        external_host_data_ = ort_val_.GetTensorMutableData<uint16_t>();
+      }
     } else {
-      LOG(FATAL) << "Not supported dtype " << static_cast<int>(dtype);
+      LOG(FATAL) << "Not supported dtype " << static_cast<int>(dtype_);
     }
   }
 
-  Tensor(Tensor&& other) {
-    if (other.ort_val_) {
-      this->ort_val_ = std::move(other.ort_val_);
-    }
-
-    this->name = other.name;
-    this->data = other.data;
-    this->dims = other.dims;
-    this->dtype = other.dtype;
-    this->on_gpu = other.on_gpu;
-  }
-
-  Tensor& operator=(Tensor&& other) {
-    if (other.ort_val_) {
-      this->ort_val_ = std::move(other.ort_val_);
-    }
-
-    this->name = other.name;
-    this->data = other.data;
-    this->dims = other.dims;
-    this->dtype = other.dtype;
-    this->on_gpu = other.on_gpu;
-    return *this;
-  }
-
-  std::string name;
-  void* data;
-  std::vector<int64_t> dims;
-  ONNXTensorElementDataType dtype;
-  bool on_gpu;
+  ~OrtTensor() override = default;
 
 private:
   Ort::Value ort_val_{nullptr};
 };
 
+// class Tensor {
+// public:
+//   explicit Tensor(const std::string& name, void* data, std::vector<int64_t> dims, ONNXTensorElementDataType dtype,
+//                   bool on_gpu)
+//       : name(name), data(data), dims(dims), dtype(dtype), on_gpu(on_gpu) {}
+
+//   explicit Tensor(const std::string& name, Ort::Value&& v) : name(name), ort_val_(std::move(v)) {
+//     if (!ort_val_.IsTensor()) {
+//       LOG(FATAL) << name << " is not Tensor";
+//     }
+//     auto info = ort_val_.GetTensorTypeAndShapeInfo();
+//     dims = info.GetShape();
+//     dtype = info.GetElementType();
+//     on_gpu = ort_val_.GetLocation().GetAllocatorName() == "Cuda";
+//     if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) { // maps to c type float
+//       data = ort_val_.GetTensorMutableData<float>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) { // maps to c type uint8_t
+//       data = ort_val_.GetTensorMutableData<uint8_t>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8) { // maps to c type int8_t
+//       data = ort_val_.GetTensorMutableData<int8_t>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16) { // maps to c
+//                                                                 // type uint16_t
+//       data = ort_val_.GetTensorMutableData<uint16_t>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16) { // maps to c type int16_t
+//       data = ort_val_.GetTensorMutableData<int16_t>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) { // maps to c type int32_t
+//       data = ort_val_.GetTensorMutableData<int32_t>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) { // maps to c type int64_t
+//       data = ort_val_.GetTensorMutableData<int64_t>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
+//       data = ort_val_.GetTensorMutableData<bool>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+//       data = ort_val_.GetTensorMutableData<__half>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE) { // maps to c type double
+//       data = ort_val_.GetTensorMutableData<double>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32) { // maps to c
+//                                                                 // type uint32_t
+//       data = ort_val_.GetTensorMutableData<uint32_t>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64) { // maps to c
+//                                                                 // type uint64_t
+//       data = ort_val_.GetTensorMutableData<uint64_t>();
+//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) { // Non-IEEE
+//                                                                   // floating-point
+//                                                                   // format based on
+//                                                                   // IEEE754
+//                                                                   // single-precision
+//       data = ort_val_.GetTensorMutableData<uint16_t>();
+//     } else {
+//       LOG(FATAL) << "Not supported dtype " << static_cast<int>(dtype);
+//     }
+//   }
+
+//   Tensor(Tensor&& other) {
+//     if (other.ort_val_) {
+//       this->ort_val_ = std::move(other.ort_val_);
+//     }
+
+//     this->name = other.name;
+//     this->data = other.data;
+//     this->dims = other.dims;
+//     this->dtype = other.dtype;
+//     this->on_gpu = other.on_gpu;
+//   }
+
+//   Tensor& operator=(Tensor&& other) {
+//     if (other.ort_val_) {
+//       this->ort_val_ = std::move(other.ort_val_);
+//     }
+
+//     this->name = other.name;
+//     this->data = other.data;
+//     this->dims = other.dims;
+//     this->dtype = other.dtype;
+//     this->on_gpu = other.on_gpu;
+//     return *this;
+//   }
+
+//   std::string name;
+//   void* data;
+//   std::vector<int64_t> dims;
+//   ONNXTensorElementDataType dtype;
+//   bool on_gpu;
+
+// private:
+//   Ort::Value ort_val_{nullptr};
+// };
+
 class Sess {
 public:
   explicit Sess(SessConfig config)
       : config_(config), env_(config.log_level, config_.onnx_file.c_str()),
-        cpu_mem_info_(Ort::MemoryInfo::CreateCpu(
-            OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU)),
-        cuda_mem_info_(Ort::MemoryInfo("Cuda", OrtDeviceAllocator,
-                                       config_.device_id, OrtMemTypeDefault)) {
+        cpu_mem_info_(Ort::MemoryInfo::CreateCpu(OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU)),
+        cuda_mem_info_(Ort::MemoryInfo("Cuda", OrtDeviceAllocator, config_.device_id, OrtMemTypeDefault)) {
     InitSession();
   }
 
-  void RegisterBeforeH2DHook(std::function<void(void)> func) {
-    before_h2d_hook_.emplace_back(func);
-  }
-  void RegisterAfterH2DHook(std::function<void(void)> func) {
-    after_h2d_hook_.emplace_back(func);
-  }
-  void RegisterBeforeRunD2HHook(std::function<void(void)> func) {
-    before_run_d2h_hook_.emplace_back(func);
-  }
-  void RegisterAfterRunD2HHook(std::function<void(void)> func) {
-    after_run_d2h_hook_.emplace_back(func);
-  }
+  void RegisterBeforeH2DHook(std::function<void(void)> func) { before_h2d_hook_.emplace_back(func); }
+  void RegisterAfterH2DHook(std::function<void(void)> func) { after_h2d_hook_.emplace_back(func); }
+  void RegisterBeforeRunD2HHook(std::function<void(void)> func) { before_run_d2h_hook_.emplace_back(func); }
+  void RegisterAfterRunD2HHook(std::function<void(void)> func) { after_run_d2h_hook_.emplace_back(func); }
 
-  std::map<std::string, Tensor>
-  RunWithBind(const std::map<std::string, Tensor>& inputs,
-              bool out_is_gpu = false) {
+  std::map<std::string, core::TensorRef> RunWithBind(const std::map<std::string, core::TensorRef>& inputs,
+                                                     bool out_is_gpu = false) {
     CHECK_EQ(inputs.size(), static_cast<size_t>(in_cnt_));
     Ort::IoBinding bind(*session_);
 
     for (auto& it : inputs) {
       auto& name = it.first;
-      auto tensor = InitTensorFromData(it.second.data, it.second.dims,
-                                       it.second.dtype, it.second.on_gpu);
+      auto ort_val = InitOrtValFromTensor(it.second);
       for (auto& hook : before_h2d_hook_)
         hook();
-      bind.BindInput(name.c_str(), tensor);
+      bind.BindInput(name.c_str(), ort_val);
       bind.SynchronizeInputs();
       for (auto& hook : after_h2d_hook_)
         hook();
     }
 
     for (size_t i = 0; i < out_cnt_; ++i) {
-      bind.BindOutput(output_names_[i].c_str(),
-                      out_is_gpu ? cuda_mem_info_ : cpu_mem_info_);
+      bind.BindOutput(output_names_[i].c_str(), out_is_gpu ? cuda_mem_info_ : cpu_mem_info_);
     }
 
     for (auto& hook : before_run_d2h_hook_)
@@ -237,19 +347,15 @@ public:
 
     auto outs = bind.GetOutputValues();
     auto out_names = bind.GetOutputNames();
-    std::map<std::string, Tensor> res;
+    std::map<std::string, core::TensorRef> res;
     for (size_t i = 0; i < out_names.size(); ++i) {
-      auto name = out_names[i];
-      auto& val = outs[i];
-      // res[name] = Tensor{name, std::move(val)};
-      res.emplace(name, Tensor(name, std::move(val)));
+      res.emplace(out_names[i], std::make_shared<OrtTensor>(std::move(outs[i])));
     }
     return res;
   }
 
-  std::map<std::string, Tensor>
-  RunNoBind(const std::map<std::string, Tensor>& inputs,
-            bool out_is_gpu = false) {
+  std::map<std::string, core::TensorRef> RunNoBind(const std::map<std::string, core::TensorRef>& inputs,
+                                                   bool out_is_gpu = false) {
     CHECK_EQ(inputs.size(), static_cast<size_t>(in_cnt_));
     std::vector<Ort::Value> input_tensors;
     input_tensors.reserve(in_cnt_);
@@ -263,19 +369,17 @@ public:
 
       for (auto& hook : before_h2d_hook_)
         hook();
-      auto tensor = InitTensorFromData(in_tensor.data, in_tensor.dims,
-                                       in_tensor.dtype, in_tensor.on_gpu);
+      auto ort_val = InitOrtValFromTensor(in_tensor);
       for (auto& hook : after_h2d_hook_)
         hook();
-      input_tensors[i] = std::move(tensor);
+      input_tensors[i] = std::move(ort_val);
     }
     for (auto& hook : before_run_d2h_hook_)
       hook();
     std::vector<Ort::Value> outs;
     try {
-      outs = session_->Run(Ort::RunOptions{nullptr},
-                                input_names_char_.data(), input_tensors.data(),
-                                in_cnt_, output_names_char_.data(), out_cnt_);
+      outs = session_->Run(Ort::RunOptions{nullptr}, input_names_char_.data(), input_tensors.data(), in_cnt_,
+                           output_names_char_.data(), out_cnt_);
       cudaDeviceSynchronize();
     } catch (const Ort::Exception& ex) {
       LOG(FATAL) << config_.onnx_file << " failed. Onnxruntime Error: " << ex.what();
@@ -287,30 +391,19 @@ public:
     for (auto& hook : after_run_d2h_hook_)
       hook();
 
-    std::map<std::string, Tensor> res;
+    std::map<std::string, core::TensorRef> res;
     for (size_t i = 0; i < output_names_.size(); ++i) {
-      auto name = output_names_[i];
-      auto& val = outs[i];
-      // res[name] = Tensor(name, std::move(val));
-      res.emplace(name, Tensor(name, std::move(val)));
+      res.emplace(output_names_[i], std::make_shared<OrtTensor>(std::move(outs[i])));
     }
     return res;
   }
 
   const std::vector<std::string>& InputNames() { return input_names_; }
   const std::vector<std::string>& OutputNames() { return output_names_; }
-  const std::vector<std::vector<int64_t>>& InputDims() {
-    return input_node_dims_;
-  }
-  const std::vector<std::vector<int64_t>>& OutputDims() {
-    return output_node_dims_;
-  }
-  const std::vector<ONNXTensorElementDataType>& InputDtypes() {
-    return input_types_;
-  }
-  const std::vector<ONNXTensorElementDataType>& OutputDtypes() {
-    return output_types_;
-  }
+  const std::vector<std::vector<int64_t>>& InputDims() { return input_node_dims_; }
+  const std::vector<std::vector<int64_t>>& OutputDims() { return output_node_dims_; }
+  const std::vector<ONNXTensorElementDataType>& InputDtypes() { return input_types_; }
+  const std::vector<ONNXTensorElementDataType>& OutputDtypes() { return output_types_; }
 
 private:
   void SetCudaProviders(int dev_id = 0) {
@@ -337,9 +430,7 @@ private:
     trt_opt.trt_engine_cache_enable = config_.trt_config.cache_dir != "";
     trt_opt.trt_engine_cache_path = config_.trt_config.cache_dir.c_str();
     trt_opt.trt_int8_calibration_table_name =
-        trt_opt.trt_int8_enable
-            ? config_.trt_config.calibration_table_name.c_str()
-            : "";
+        trt_opt.trt_int8_enable ? config_.trt_config.calibration_table_name.c_str() : "";
     trt_opt.trt_dump_subgraphs = false;
 
     trt_opt.trt_filter_ops = config_.trt_config.filter_ops.c_str();
@@ -365,8 +456,7 @@ private:
     session_options_.AppendExecutionProvider_OpenVINO(options);
 
     // https://onnxruntime.ai/docs/execution-providers/OpenVINO-ExecutionProvider.html#onnxruntime-graph-level-optimization
-    session_options_.SetGraphOptimizationLevel(
-        GraphOptimizationLevel::ORT_DISABLE_ALL);
+    session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_DISABLE_ALL);
   }
 
   void InitSession() {
@@ -385,12 +475,9 @@ private:
     SetCpuProviders();
 
     auto session_start = std::chrono::high_resolution_clock::now();
-    session_.reset(
-        new Ort::Session(env_, config_.onnx_file.c_str(), session_options_));
+    session_.reset(new Ort::Session(env_, config_.onnx_file.c_str(), session_options_));
     auto session_end = std::chrono::high_resolution_clock::now();
-    auto dur =
-        std::chrono::duration<double, std::milli>(session_end - session_start)
-            .count();
+    auto dur = std::chrono::duration<double, std::milli>(session_end - session_start).count();
     warmup_time_ms_ += dur;
     // LOG(INFO) << "Init session time is " << dur << ", ms";
 
@@ -423,18 +510,25 @@ private:
     }
   }
 
-  Ort::Value InitTensorFromData(void* data, const std::vector<int64_t>& dims,
-                                ONNXTensorElementDataType type, bool on_gpu) {
-    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(
-        OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU);
-    Ort::MemoryInfo cuda_mem_info{"Cuda", OrtDeviceAllocator, config_.device_id,
-                                  OrtMemTypeDefault};
-    size_t num =
-        std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
-    Ort::Value tensor = Ort::Value::CreateTensor(
-        on_gpu ? cuda_mem_info : mem_info, data, num * SizeOf(type),
-        dims.data(), dims.size(), type);
+  Ort::Value InitOrtValFromData(void* data, const std::vector<int64_t>& dims, ONNXTensorElementDataType type,
+                                bool on_gpu) {
+    Ort::MemoryInfo mem_info =
+        Ort::MemoryInfo::CreateCpu(OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU);
+    Ort::MemoryInfo cuda_mem_info{"Cuda", OrtDeviceAllocator, config_.device_id, OrtMemTypeDefault};
+    size_t num = std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int>());
+    Ort::Value tensor = Ort::Value::CreateTensor(on_gpu ? cuda_mem_info : mem_info, data, num * SizeOf(type),
+                                                 dims.data(), dims.size(), type);
     return tensor;
+  }
+
+  Ort::Value InitOrtValFromTensor(const core::TensorRef& t) {
+    Ort::MemoryInfo mem_info =
+        Ort::MemoryInfo::CreateCpu(OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeCPU);
+    Ort::MemoryInfo cuda_mem_info{"Cuda", OrtDeviceAllocator, config_.device_id, OrtMemTypeDefault};
+    auto location = t->GetLocation();
+    return Ort::Value::CreateTensor(location == core::Location::kDEVICE ? cuda_mem_info : mem_info,
+                                    location == core::Location::kDEVICE ? t->DeviceData() : t->HostData(), t->Bytes(),
+                                    t->GetDims().d, t->GetDims().num_dims, ToDataType(t->GetDataType()));
   }
 
 private:

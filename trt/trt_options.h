@@ -126,6 +126,7 @@ public:
   int32_t infStream{defaultStreams};
   int32_t optProfileIndex{defaultOptProfileIndex};
   bool graph{false};
+  bool setOptProfile{false};
 
   using ShapeProfile = std::unordered_map<std::string, std::vector<int32_t>>;
   ShapeProfile shapes;

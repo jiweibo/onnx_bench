@@ -27,6 +27,7 @@
 
 #include "utils/memuse.h"
 #include "utils/nvtx.h"
+#include "utils/random_value.h"
 #include "utils/timer.h"
 #include "utils/util.h"
 
@@ -138,6 +139,33 @@ const void* GetOrtDataPtr(const Ort::Value& tensor) {
     LOG(FATAL) << "Not supported data type " << type;
   }
   return data;
+}
+
+void RandomFillTensor(core::TensorRef& tensor) {
+  auto num = tensor->Numel();
+  auto dtype = tensor->GetDataType();
+  switch (dtype) {
+  case core::DataType::kBOOL:
+    FillBuffer<bool>(tensor->HostData(), num, 0, 1);
+    break;
+  case core::DataType::kUINT8:
+    FillBuffer<uint8_t>(tensor->HostData(), num, 0, 255);
+    break;
+  case core::DataType::kINT8:
+  case core::DataType::kINT32:
+  case core::DataType::kINT64:
+    FillBuffer<int32_t>(tensor->HostData(), num, -128, 127);
+    break;
+  case core::DataType::kFLOAT:
+    FillBuffer<float>(tensor->HostData(), num, -1.f, 1.f);
+    break;
+  case core::DataType::kHALF:
+  case core::DataType::kBF16:
+  case core::DataType::kFP8:
+  case core::DataType::kINT4:
+  default:
+    LOG(FATAL) << "Not supported dtype " << static_cast<int>(dtype);
+  }
 }
 
 float MeanValue(const Ort::Value& tensor) {
@@ -488,16 +516,17 @@ int main(int argc, char** argv) {
 
   auto input_dims = session.InputDims();
   const auto& input_types = session.InputDtypes();
-  std::map<std::string, Tensor> inputs;
+  std::map<std::string, core::TensorRef> inputs;
   std::vector<void*> to_free(input_dims.size());
   for (size_t i = 0; i < input_dims.size(); ++i) {
     auto name = session.InputNames()[i];
     if (input_dims[i][0] == -1) {
       input_dims[i][0] = FLAGS_batch;
     }
-    void* data = GenerateData(input_dims[i], session.InputDtypes()[i]);
-    to_free[i] = data;
-    inputs.emplace(name, Tensor(name, data, input_dims[i], input_types[i], false));
+    auto ort_tensor = std::make_shared<core::Tensor>(core::Dims(input_dims[i]), ToDataType(session.InputDtypes()[i]),
+                                                     core::Location::kHOST);
+    RandomFillTensor(ort_tensor);
+    inputs.emplace(name, std::move(ort_tensor));
   }
   MemoryUse memuse(FLAGS_device_id);
   memuse.Start();

@@ -17,12 +17,14 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/core.h"
 #include "ifx.h"
 #include "utils/barrier.h"
 #include "utils/cupti_inc.h"
 #include "utils/memuse.h"
 #include "utils/nvml.h"
 #include "utils/nvtx.h"
+#include "utils/random_value.h"
 #include "utils/timer.h"
 
 #include <cuda_fp16.h>
@@ -38,8 +40,7 @@
 using namespace ifx_sess;
 
 // DEFINE_string(ifx, "", "ifx model file");
-DEFINE_string(ifxs, "",
-              "a.ifxmodel b.ifxmodel c.ifxmodel <d.ifxmodel e.ifxmodel> ....");
+DEFINE_string(ifxs, "", "a.ifxmodel b.ifxmodel c.ifxmodel <d.ifxmodel e.ifxmodel> ....");
 DEFINE_string(bs, "", "1 12 1 <1 3> ...");
 DEFINE_string(ifx_threads, "", "1 1 1 1 ...");
 DEFINE_string(priority, "", "-5 -5 -4 0");
@@ -66,60 +67,35 @@ DEFINE_string(cacheDir, "", "the cache dir");
 std::default_random_engine e(1998);
 
 namespace {
-
-void* GenerateData(const std::vector<int64_t>& dims, ifx::DataType type) {
-  int64_t num =
-      std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int64_t>());
-  if (type == ifx::DATA_TYPE_FP32) {
-    float* ptr = static_cast<float*>(malloc(num * sizeof(float)));
-    std::uniform_real_distribution<float> u(-1, 1);
-    for (size_t i = 0; i < num; ++i) {
-      ptr[i] = 0; // u(e);
-    }
-    return ptr;
-  } else if (type == ifx::DATA_TYPE_FP16) {
-    half* ptr = static_cast<half*>(malloc(num * sizeof(half)));
-    std::uniform_real_distribution<float> u(-1, 1);
-    for (size_t i = 0; i < num; ++i) {
-      ptr[i] = __half2float(u(e));
-    }
-    return ptr;
-  } else if (type == ifx::DATA_TYPE_INT32) {
-    int* ptr = static_cast<int*>(malloc(num * sizeof(int)));
-    std::uniform_int_distribution<int> u(0, 127);
-    for (size_t i = 0; i < num; ++i) {
-      ptr[i] = 0; // u(e);
-    }
-    return ptr;
-  } else if (type == ifx::DATA_TYPE_INT64) {
-    auto* ptr = static_cast<int64_t*>(malloc(num * sizeof(int64_t)));
-    std::uniform_int_distribution<int> u(-128, 127);
-    for (size_t i = 0; i < num; ++i) {
-      ptr[i] = u(e);
-    }
-    return ptr;
-  } else if (type == ifx::DATA_TYPE_BOOL) {
-    bool* ptr = static_cast<bool*>(malloc(num * sizeof(bool)));
-    std::uniform_int_distribution<int> u(0, 1);
-    for (size_t i = 0; i < num; ++i) {
-      ptr[i] = u(e);
-    }
-    return ptr;
-  } else if (type == ifx::DATA_TYPE_UINT8) {
-    auto* ptr = static_cast<uint8_t*>(malloc(num * sizeof(uint8_t)));
-    std::uniform_int_distribution<uint8_t> u(0, 255);
-    for (size_t i = 0; i < num; ++i) {
-      ptr[i] = u(e);
-    }
-    return ptr;
-  } else {
-    LOG(FATAL) << "Not supported data type " << type;
+void RandomFillTensor(core::TensorRef& tensor) {
+  auto num = tensor->Numel();
+  auto dtype = tensor->GetDataType();
+  switch (dtype) {
+  case core::DataType::kFLOAT:
+    FillBuffer<float>(tensor->HostData(), num, -1., 1.f);
+    break;
+  case core::DataType::kBOOL:
+    FillBuffer<bool>(tensor->HostData(), num, 0, 1);
+    break;
+  case core::DataType::kUINT8:
+    FillBuffer<uint8_t>(tensor->HostData(), num, 0, 255);
+    break;
+  case core::DataType::kINT8:
+  case core::DataType::kINT32:
+  case core::DataType::kINT64:
+    FillBuffer<int32_t>(tensor->HostData(), num, -128, 127);
+    break;
+  case core::DataType::kHALF:
+  case core::DataType::kBF16:
+  case core::DataType::kFP8:
+  case core::DataType::kINT4:
+  default:
+    LOG(FATAL) << "Not supported dtype " << static_cast<int>(dtype);
   }
-
-  return nullptr;
 }
 
-template <typename T> std::string PrintShape(const std::vector<T>& v) {
+template <typename T>
+std::string PrintShape(const std::vector<T>& v) {
   std::stringstream ss;
   for (size_t i = 0; i < v.size() - 1; ++i) {
     ss << v[i] << "x";
@@ -142,8 +118,7 @@ std::vector<SessConfig> ParseFlags(const std::vector<std::string>& ifxs) {
   return configs;
 }
 
-std::vector<std::vector<SessConfig>>
-ParseFlags(const std::vector<std::vector<std::string>>& ifx_vecs) {
+std::vector<std::vector<SessConfig>> ParseFlags(const std::vector<std::vector<std::string>>& ifx_vecs) {
   std::vector<std::vector<SessConfig>> configs(ifx_vecs.size());
   for (size_t i = 0; i < ifx_vecs.size(); ++i) {
     for (size_t j = 0; j < ifx_vecs[i].size(); ++j) {
@@ -192,8 +167,7 @@ std::vector<std::vector<std::string>> GetIfxModels(const std::string& ifxs) {
   size_t end = 0;
 
   // Process each pair of angle brackets
-  while ((start = remaining.find('<')) != std::string::npos &&
-         (end = remaining.find('>')) != std::string::npos) {
+  while ((start = remaining.find('<')) != std::string::npos && (end = remaining.find('>')) != std::string::npos) {
     // Extract the part before the first '<'
     std::string beforeBrackets = TrimString(remaining.substr(0, start));
     if (!beforeBrackets.empty()) {
@@ -252,8 +226,7 @@ std::vector<std::vector<int>> ParseBatches(const std::string& str) {
   size_t end = 0;
 
   // Process each pair of angle brackets
-  while ((start = remaining.find('<')) != std::string::npos &&
-         (end = remaining.find('>')) != std::string::npos) {
+  while ((start = remaining.find('<')) != std::string::npos && (end = remaining.find('>')) != std::string::npos) {
     // Extract the part before the first '<'
     std::string beforeBrackets = TrimString(remaining.substr(0, start));
     if (!beforeBrackets.empty()) {
@@ -308,16 +281,14 @@ std::vector<int> ParseStrToVec(const std::string& str) {
   return res;
 }
 
-void RunCascade(std::vector<std::unique_ptr<Ifx_Sess>>& sessions,
-                std::vector<NvtxRange>& nvtxs, const std::vector<int>& batches,
-                Barrier* barrier = nullptr, cudaStream_t stream = nullptr,
+void RunCascade(std::vector<std::unique_ptr<Ifx_Sess>>& sessions, std::vector<NvtxRange>& nvtxs,
+                const std::vector<int>& batches, Barrier* barrier = nullptr, cudaStream_t stream = nullptr,
                 int repeats = 1) {
   int in_tensor_num = 0;
   for (auto& sess : sessions) {
     in_tensor_num += sess->InputDtypes().size();
   }
-  std::vector<std::map<std::string, Tensor>> in_tensors(in_tensor_num);
-  std::vector<void*> to_free(in_tensor_num);
+  std::vector<std::map<std::string, std::shared_ptr<core::Tensor>>> in_tensors(in_tensor_num);
 
   for (size_t i = 0; i < sessions.size(); ++i) {
     for (size_t j = 0; j < sessions[i]->InputNames().size(); ++j) {
@@ -325,13 +296,11 @@ void RunCascade(std::vector<std::unique_ptr<Ifx_Sess>>& sessions,
       auto in_dims = sessions[i]->InputDims()[j];
       if (!batches.empty())
         in_dims[0] = batches[i];
-      auto* data = GenerateData(in_dims, sessions[i]->InputDtypes()[j]);
-      to_free.push_back(data);
-      std::vector<int32_t> in_dims_32(in_dims.begin(), in_dims.end());
-      auto ifx_tensor =
-          Tensor(name, data, in_dims_32, sessions[i]->InputDtypes()[j],
-                 sessions[i]->InputFormats()[j], false);
-      in_tensors[i].emplace(name, std::move(ifx_tensor));
+
+      auto ifx_tensor = std::make_shared<core::Tensor>(
+          core::Dims(in_dims), ifx_sess::ToDataType(sessions[i]->InputDtypes()[j]), core::Location::kHOST);
+      RandomFillTensor(ifx_tensor);
+      in_tensors[i].emplace(name, ifx_tensor);
     }
   }
 
@@ -351,57 +320,10 @@ void RunCascade(std::vector<std::unique_ptr<Ifx_Sess>>& sessions,
   }
 
   for (size_t i = 0; i < sessions.size(); ++i) {
-    LOG(INFO) << std::this_thread::get_id() << " "
-              << sessions[i]->Config().ifx_file << " time is "
+    LOG(INFO) << std::this_thread::get_id() << " " << sessions[i]->Config().ifx_file << " time is "
               << timers[i].GetAverageTime() << " ms"
-              << ", tp50: " << timers[i].ComputePercentile(0.5)
-              << ", tp90: " << timers[i].ComputePercentile(0.9)
+              << ", tp50: " << timers[i].ComputePercentile(0.5) << ", tp90: " << timers[i].ComputePercentile(0.9)
               << ", tp99: " << timers[i].ComputePercentile(0.99);
-  }
-  for (auto* p : to_free) {
-    free(p);
-  }
-}
-
-void Run(Ifx_Sess& session, Barrier* barrier = nullptr, int repeats = 1,
-         int batch = -1) {
-  std::map<std::string, Tensor> in_tensors;
-  std::vector<void*> to_free(session.InputDtypes().size());
-
-  for (size_t i = 0; i < session.InputNames().size(); ++i) {
-    auto& name = session.InputNames()[i];
-    auto in_dims = session.InputDims()[i];
-    if (batch != -1)
-      in_dims[0] = batch;
-    auto* data = GenerateData(in_dims, session.InputDtypes()[i]);
-    to_free.push_back(data);
-    std::vector<int32_t> in_dims_32(in_dims.begin(), in_dims.end());
-    auto ifx_tensor = Tensor(name, data, in_dims_32, session.InputDtypes()[i],
-                             session.InputFormats()[i], false);
-    in_tensors.emplace(name, std::move(ifx_tensor));
-  }
-
-  StopWatchTimer timer;
-  NvtxRange nvtx(session.Config().ifx_file);
-  for (size_t i = 0; i < repeats; ++i) {
-    nvtx.Begin();
-    if (barrier)
-      barrier->Wait();
-    std::uniform_int_distribution<> dis(0, 300);
-    std::this_thread::sleep_for(std::chrono::microseconds(dis(e)));
-    timer.Start();
-    auto out_tensors = session.Run(in_tensors);
-    timer.Stop();
-    nvtx.End();
-  }
-  LOG(INFO) << std::this_thread::get_id() << " " << session.Config().ifx_file
-            << " time is " << timer.GetAverageTime() << " ms"
-            << ", tp50: " << timer.ComputePercentile(0.5)
-            << ", tp90: " << timer.ComputePercentile(0.9)
-            << ", tp99: " << timer.ComputePercentile(0.99);
-
-  for (auto* p : to_free) {
-    free(p);
   }
 }
 } // namespace
@@ -476,18 +398,14 @@ int main(int argc, char** argv) {
       CHECK_EQ(cudaStreamCreate(&streams[i]), cudaSuccess);
     } else {
       int low_priority, high_priority;
-      CHECK_EQ(cudaDeviceGetStreamPriorityRange(&low_priority, &high_priority),
-               cudaSuccess);
-      CHECK_EQ(cudaStreamCreateWithPriority(&streams[i], cudaStreamNonBlocking,
-                                            priorities[i]),
-               cudaSuccess);
+      CHECK_EQ(cudaDeviceGetStreamPriorityRange(&low_priority, &high_priority), cudaSuccess);
+      CHECK_EQ(cudaStreamCreateWithPriority(&streams[i], cudaStreamNonBlocking, priorities[i]), cudaSuccess);
     }
   }
   LOG(INFO) << "Init session done";
 
   for (size_t i = 0; i < sessions.size(); ++i) {
-    RunCascade(sessions[i], nvtxs[i],
-               batches.empty() ? std::vector<int>{} : batches[i], nullptr,
+    RunCascade(sessions[i], nvtxs[i], batches.empty() ? std::vector<int>{} : batches[i], nullptr,
                streams.empty() ? nullptr : streams[i], FLAGS_warmup);
   }
 
@@ -501,10 +419,9 @@ int main(int argc, char** argv) {
   int thread_num = 0;
   for (size_t i = 0; i < ifx_threads.size(); ++i) {
     for (size_t j = 0; j < ifx_threads[i]; ++j) {
-      threads[thread_num++] = std::thread(
-          RunCascade, std::ref(sessions[i]), std::ref(nvtxs[i]),
-          batches.empty() ? std::vector<int>{} : batches[i], &barrier,
-          streams.empty() ? nullptr : streams[i], FLAGS_repeats);
+      threads[thread_num++] = std::thread(RunCascade, std::ref(sessions[i]), std::ref(nvtxs[i]),
+                                          batches.empty() ? std::vector<int>{} : batches[i], &barrier,
+                                          streams.empty() ? nullptr : streams[i], FLAGS_repeats);
     }
   }
   for (size_t i = 0; i < threads.size(); ++i) {

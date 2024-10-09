@@ -1,11 +1,13 @@
 #pragma once
+#include "core/core.h"
 #include "ifx/ifx.h"
-#include "utils/cuda_graph.h"
 #include "utils/util.h"
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <memory>
 
 #include <cuda_runtime_api.h>
 
@@ -13,6 +15,67 @@
 #include <glog/logging.h>
 
 namespace ifx_sess {
+inline core::Dims ToDims(const std::vector<int32_t>& ifx_dims) {
+  core::Dims res(ifx_dims);
+  return res;
+}
+
+inline core::DataType ToDataType(ifx::DataType dtype) {
+  switch (dtype) {
+  case ifx::DataType::DATA_TYPE_BOOL:
+    return core::DataType::kBOOL;
+  case ifx::DataType::DATA_TYPE_FP16:
+    return core::DataType::kHALF;
+  case ifx::DataType::DATA_TYPE_FP32:
+    return core::DataType::kFLOAT;
+  case ifx::DataType::DATA_TYPE_INT32:
+    return core::DataType::kINT32;
+  case ifx::DataType::DATA_TYPE_INT64:
+    return core::DataType::kINT64;
+  case ifx::DataType::DATA_TYPE_INT8:
+    return core::DataType::kINT8;
+  case ifx::DataType::DATA_TYPE_UINT8:
+    return core::DataType::kUINT8;
+  case ifx::DataType::DATA_TYPE_BF16:
+    return core::DataType::kBF16;
+  default:
+    return core::DataType::kFLOAT;
+  };
+}
+
+inline ifx::DataType ToDataType(core::DataType dtype) {
+  switch (dtype) {
+  case core::DataType::kBOOL:
+    return ifx::DataType::DATA_TYPE_BOOL;
+  case core::DataType::kHALF:
+    return ifx::DataType::DATA_TYPE_FP16;
+  case core::DataType::kFLOAT:
+    return ifx::DataType::DATA_TYPE_FP32;
+  case core::DataType::kINT32:
+    return ifx::DataType::DATA_TYPE_INT32;
+  case core::DataType::kINT64:
+    return ifx::DataType::DATA_TYPE_INT64;
+  case core::DataType::kINT8:
+    return ifx::DataType::DATA_TYPE_INT8;
+  case core::DataType::kUINT8:
+    return ifx::DataType::DATA_TYPE_UINT8;
+  case core::DataType::kBF16:
+    return ifx::DataType::DATA_TYPE_BF16;
+  default:
+    return ifx::DataType::DATA_TYPE_FP32;
+  };
+}
+
+inline ifx::Tensor* ToIfxTensor(const core::TensorRef& t, ifx::TensorFormat format) {
+  if (t->GetLocation() == core::Location::kDEVICE) {
+    return ifx::Tensor::create(ifx::DeviceType::DEVICE_TYPE_CUDA, t->GetDims().ToStdVec<int32_t>(), format,
+                               ToDataType(t->GetDataType()), const_cast<void*>(t->DeviceData()));
+
+  } else {
+    return ifx::Tensor::create(ifx::DeviceType::DEVICE_TYPE_NATIVE, t->GetDims().ToStdVec<int32_t>(), format,
+                               ToDataType(t->GetDataType()), const_cast<void*>(t->HostData()));
+  }
+}
 
 struct SessConfig {
   std::string ifx_file;
@@ -65,7 +128,7 @@ inline std::vector<int64_t> GetShape(const ifx::IONode& node) {
     shape = {node.sN, node.sW, node.sH, node.sC};
     break;
   case ifx::TensorFormat::TENSOR_FORMAT_NCHWD:
-    shape = {node.sN, node.sC, node.sW, node.sH, node.sD};
+    shape = {node.sN, node.sC, node.sD, node.sH, node.sW};
     break;
   case ifx::TensorFormat::TENSOR_FORMAT_HW:
     shape = {node.sH, node.sW};
@@ -85,80 +148,31 @@ inline std::vector<int64_t> GetShape(const ifx::IONode& node) {
   return shape;
 }
 
-class Tensor {
+class IfxTensor : public core::Tensor {
 public:
-  explicit Tensor(const std::string& name, void* data, std::vector<int32_t> dims, ifx::DataType dtype,
-                  ifx::TensorFormat data_format, bool on_gpu)
-      : name(name), data(data), dims(dims), dtype(dtype), data_format(data_format), on_gpu(on_gpu) {
-    if (on_gpu) {
-      ifx_tensor_ = ifx::Tensor::create(ifx::DeviceType::DEVICE_TYPE_CUDA, dims, data_format, dtype, data);
-    } else {
-      ifx_tensor_ = ifx::Tensor::create(ifx::DeviceType::DEVICE_TYPE_NATIVE, dims, data_format, dtype, data);
-    }
-  }
+  explicit IfxTensor(ifx::Tensor* ifx_tensor)
+      : core::Tensor(ifx_tensor->host(), ifx_tensor->getByteSize(), ToDims(ifx_tensor->getDims()),
+                     ToDataType(ifx_tensor->getDataType())),
+        ifx_tensor_(ifx_tensor) {}
 
-  ~Tensor() {
+  ~IfxTensor() override {
     if (ifx_tensor_) {
       ifx_tensor_->destroy();
-      ifx_tensor_ = nullptr;
     }
   }
-
-  explicit Tensor(const std::string& name, ifx::Tensor* ifx_tensor) : name(name), ifx_tensor_(ifx_tensor) {
-    dims = ifx_tensor->getDims();
-    dtype = ifx_tensor->getDataType();
-    data_format = ifx_tensor->getFormat();
-    // TODO(wilber): now force on host.
-    data = ifx_tensor->host();
-    on_gpu = false;
-  }
-
-  Tensor(Tensor&& other) {
-    if (other.ifx_tensor_) {
-      this->ifx_tensor_ = std::move(other.ifx_tensor_);
-      other.ifx_tensor_ = nullptr;
-    }
-
-    this->name = other.name;
-    this->data = other.data;
-    this->dims = other.dims;
-    this->dtype = other.dtype;
-    this->on_gpu = other.on_gpu;
-  }
-
-  Tensor& operator=(Tensor&& other) {
-    if (other.ifx_tensor_) {
-      this->ifx_tensor_ = std::move(other.ifx_tensor_);
-      other.ifx_tensor_ = nullptr;
-    }
-
-    this->name = other.name;
-    this->data = other.data;
-    this->dims = other.dims;
-    this->dtype = other.dtype;
-    this->on_gpu = other.on_gpu;
-    return *this;
-  }
-
-  std::string name;
-  void* data;
-  std::vector<int32_t> dims;
-  ifx::DataType dtype;
-  ifx::TensorFormat data_format;
-  bool on_gpu;
-  ifx::Tensor* ifx_tensor_{nullptr};
 
 private:
+  ifx::Tensor* ifx_tensor_{nullptr};
 };
 
 class Ifx_Sess {
 public:
   Ifx_Sess(const SessConfig& cfg) : config_(cfg) {
-    LOG(INFO) << "Ifx_Sess this is " << this;
     InitSession();
   }
 
-  std::map<std::string, Tensor> Run(const std::map<std::string, Tensor>& in_tensors, cudaStream_t stream = nullptr) {
+  std::map<std::string, core::TensorRef> Run(const std::map<std::string, core::TensorRef>& in_tensors,
+                                             cudaStream_t stream = nullptr) {
     std::map<std::string, ifx::Tensor*> input_ifx_tensors;
     std::map<std::string, ifx::Tensor*> output_ifx_tensors;
 
@@ -166,7 +180,7 @@ public:
       auto& name = input_names_[i];
       for (auto& hook : before_h2d_hook_)
         hook();
-      input_ifx_tensors[name] = in_tensors.at(name).ifx_tensor_;
+      input_ifx_tensors[name] = ToIfxTensor(in_tensors.at(name), input_formats_[i]);
       for (auto& hook : after_h2d_hook_)
         hook();
     }
@@ -192,14 +206,13 @@ public:
     } catch (...) {
       LOG(FATAL) << "Unknown Exception Occured.";
     }
-
     for (auto& hook : after_run_d2h_hook_)
       hook();
 
-    std::map<std::string, Tensor> res;
+    std::map<std::string, std::shared_ptr<core::Tensor>> res;
     for (size_t i = 0; i < output_names_.size(); ++i) {
       auto& name = output_names_[i];
-      res.emplace(name, Tensor(name, output_ifx_tensors[name]));
+      res.emplace(name, std::make_shared<IfxTensor>(output_ifx_tensors[name]));
     }
     return res;
   }

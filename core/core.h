@@ -109,9 +109,20 @@ public:
   //! The extent of each dimension.
   int64_t d[MAX_DIMS];
 
+  Dims() = default;
+
   Dims(std::initializer_list<int> list) {
     num_dims = list.size();
     std::copy(list.begin(), list.end(), d);
+  }
+
+  template <typename T>
+  Dims(const std::vector<T>& vec) {
+    CHECK_LE(vec.size(), MAX_DIMS);
+    num_dims = vec.size();
+    for (size_t i = 0; i < vec.size(); ++i) {
+      this->d[i] = vec[i];
+    }
   }
 
   inline int64_t Numel() const {
@@ -239,8 +250,6 @@ using HostBuffer = Buffer<HostAllocator>;
 ///     permission to modify external pointers
 class Tensor {
 public:
-  Tensor() = delete;
-
   explicit Tensor(Dims dims, DataType dtype = DataType::kFLOAT, Location location = Location::kHOST,
                   int32_t device_id = -1)
       : dtype_(dtype), dims_(dims), location_(location), device_id_(device_id) {
@@ -316,7 +325,7 @@ public:
     return *this;
   }
 
-  virtual ~Tensor() {}
+  virtual ~Tensor() = default;
 
   void Resize(const Dims& dims) {
     CHECK_EQ(external_device_data_ == nullptr && external_host_data_ == nullptr, true)
@@ -459,7 +468,11 @@ public:
   Location GetLocation() const { return location_; }
 
 protected:
-  const DataType dtype_;
+  // Used to construct sub-class tensor.
+  Tensor() = default;
+
+protected:
+  DataType dtype_;
   Dims dims_;
   Location location_;
   int device_id_;
@@ -470,5 +483,7 @@ protected:
   void* external_host_data_{nullptr};
   size_t external_size_{0};
 };
+
+using TensorRef = std::shared_ptr<Tensor>;
 
 } // namespace core
