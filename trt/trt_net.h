@@ -40,6 +40,17 @@ public:
     bEnv_.reset();
 
     CHECK_EQ(setUpInference(*iEnv_, inference, sys), true);
+
+    const auto& engine = iEnv_->contexts.front()->getEngine();
+    int32_t num_tensors = engine.getNbIOTensors();
+    for (int32_t i = 0; i < num_tensors; ++i) {
+      const char* name = engine.getIOTensorName(i);
+      if (engine.getTensorIOMode(name) == TensorIOMode::kINPUT) {
+        in_names_.emplace_back(name);
+      } else {
+        out_names_.emplace_back(name);
+      }
+    }
   }
 
   // TODO(wilber): thread-safe.
@@ -48,15 +59,10 @@ public:
     auto* bindings = iEnv_->bindings.front().get();
     const auto& engine = ctx->getEngine();
 
-    int32_t num = engine.getNbIOTensors();
-    for (int i = 0; i < num; ++i) {
-      const char* name = engine.getIOTensorName(i);
-      bool is_input = engine.getTensorIOMode(name) == TensorIOMode::kINPUT;
-      if (is_input) {
-        auto& t = inputs.at(name);
-        auto dims = t.GetDims();
-        ctx->setInputShape(name, ToNvDims(dims));
-      }
+    for (auto& name : in_names_) {
+      auto& t = inputs.at(name);
+      auto dims = t.GetDims();
+      ctx->setInputShape(name, ToNvDims(dims));
     }
 
     bindings->FillTensors(inputs, *stream_);
@@ -73,4 +79,6 @@ private:
   std::unique_ptr<BuildEnvironment> bEnv_;
   std::unique_ptr<InferenceEnvironment> iEnv_;
   std::unique_ptr<cudaStream_t, decltype(StreamDeleter)> stream_;
+  std::vector<const char*> in_names_;
+  std::vector<const char*> out_names_;
 };

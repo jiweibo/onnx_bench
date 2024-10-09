@@ -114,6 +114,15 @@ public:
     std::copy(list.begin(), list.end(), d);
   }
 
+  template <typename T>
+  Dims(const std::vector<T>& vec) {
+    CHECK_LE(vec.size(), MAX_DIMS);
+    num_dims = vec.size();
+    for (size_t i = 0; i < vec.size(); ++i) {
+      this->d[i] = vec[i];
+    }
+  }
+
   inline int64_t Numel() const {
     if (num_dims == 0) {
       return 0;
@@ -316,7 +325,7 @@ public:
     return *this;
   }
 
-  virtual ~Tensor() {}
+  virtual ~Tensor() = default;
 
   void Resize(const Dims& dims) {
     CHECK_EQ(external_device_data_ == nullptr && external_host_data_ == nullptr, true)
@@ -470,5 +479,7 @@ protected:
   void* external_host_data_{nullptr};
   size_t external_size_{0};
 };
+
+using TensorRef = std::shared_ptr<Tensor>;
 
 } // namespace core
