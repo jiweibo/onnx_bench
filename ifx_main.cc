@@ -83,7 +83,7 @@ void RandomFillTensor(core::TensorRef& tensor) {
   case core::DataType::kINT8:
   case core::DataType::kINT32:
   case core::DataType::kINT64:
-    FillBuffer<int32_t>(tensor->HostData(), num, -128, 127);
+    FillBuffer<int32_t>(tensor->HostData(), num, 0, 127);
     break;
   case core::DataType::kHALF:
   case core::DataType::kBF16:

@@ -270,7 +270,7 @@ public:
   explicit Tensor(void* data, size_t size, Dims dims, DataType dtype, Location location = Location::kHOST,
                   int32_t devie_id = -1)
       : dtype_(dtype), dims_(dims), location_(location), device_id_(devie_id), external_size_(size) {
-    CHECK_GE(external_size_, GetBytes(dims, dtype));
+    CHECK_GE(external_size_, GetBytes(dims, dtype, false));
     if (location == Location::kDEVICE) {
       external_device_data_ = data;
     } else {

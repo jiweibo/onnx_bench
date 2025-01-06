@@ -7,3 +7,6 @@ target_link_libraries(test_trt_net trt_lib ${DEPS})
 
 add_executable(test_trt test_trt.cc)
 target_link_libraries(test_trt ${DEPS} nvinfer nvinfer_plugin nvonnxparser)
+
+add_executable(submit_multi_kernel submit_multi_kernel.cu)
+target_link_libraries(submit_multi_kernel ${DEPS})
