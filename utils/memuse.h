@@ -2,121 +2,138 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstring>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
-#include <ratio>
+#include <mutex>
+#include <sstream>
 #include <thread>
 #include <unistd.h>
 
-#include <cuda_runtime_api.h>
-
-#include <nvml.h>
+#include <cuda_runtime.h>
 
 class MemoryUse {
 public:
-  MemoryUse(int device_id) {
-    // // Initialize NVML library
-    // auto status = nvmlInit();
+  MemoryUse(int device_id = 0, bool to_file = false, const std::string& output_file = "memory_usage.csv",
+            int period_ms = 100)
+      : run_(true), to_file_(to_file), output_file_(output_file), period_ms_(period_ms), max_rss_mem_(0),
+        max_vsz_mem_(0), max_gpu_mem_(0) {
 
-    // // Query device handle
-    // status = nvmlDeviceGetHandleByIndex(device_id, &device_);
-  }
-
-  void Start() {
-    run_.store(true);
-    cpu_mem_thread_ = std::thread(&MemoryUse::GetCpuMemory, this);
-    gpu_mem_thread_ = std::thread(&MemoryUse::GetGpuMemory, this);
-  }
-
-  std::tuple<size_t, size_t, size_t> GetMemInfo() {
-    return {vsz_mem_, rss_mem_, gpu_mem_};
-  }
-
-  void Stop() {
-    run_.store(false);
-    bool cpu_stop = false;
-    bool gpu_stop = false;
-    while (true) {
-      if (cpu_mem_thread_.joinable()) {
-        cpu_mem_thread_.join();
-        cpu_stop = true;
+    if (to_file_) {
+      output_stream_.open(output_file_, std::ios::out | std::ios::app);
+      if (!output_stream_.is_open()) {
+        std::cerr << "Error: Unable to open file " << output_file_ << std::endl;
+        exit(1);
       }
-      if (gpu_mem_thread_.joinable()) {
-        gpu_mem_thread_.join();
-        gpu_stop = true;
-      }
-      if (cpu_stop && gpu_stop) {
-        break;
-      }
+      output_stream_ << "Timestamp, VmRSS(KB), VmSize(KB), GPU Memory(MB)\n";
     }
+
+    monitor_thread_ = std::thread(&MemoryUse::MonitorMemoryUsage, this);
+  }
+
+  ~MemoryUse() {
+    Stop();
+    PrintMaxMemInfo();
   }
 
 private:
-  void GetCpuMemory() {
+  void MonitorMemoryUsage() {
     pid_t pid = getpid();
+    std::string filename = "/proc/" + std::to_string(pid) + "/status";
+    size_t prev_rss_mem = 0, prev_vsz_mem = 0, prev_gpu_mem = 0;
+
     while (run_.load()) {
-      FILE* fd;
-      char line[1024] = {0};
-      char virtual_filename[32] = {0};
-      char vmrss_name[32] = {0};
-      int vmrss_num = 0;
-      int vm_size_num = 0;
-      sprintf(virtual_filename, "/proc/%d/status", pid);
-      fd = fopen(virtual_filename, "r");
-      if (fd == NULL) {
-        std::cout << "open " << virtual_filename << " failed" << std::endl;
+      std::ifstream file(filename);
+      if (!file.is_open()) {
+        std::cerr << "Error: cannot open " << filename << std::endl;
         exit(1);
       }
-      for (int i = 0; i < 60; ++i) {
-        fgets(line, sizeof(line), fd);
-        if (strstr(line, "VmRSS:") != NULL) {
-          sscanf(line, "%s %d", vmrss_name, &vmrss_num);
-        }
-        if (strstr(line, "VmSize:") != NULL) {
-          sscanf(line, "%s %d", vmrss_name, &vm_size_num);
-        }
 
-        if (vmrss_num != 0 && vm_size_num != 0) {
+      size_t vmrss = 0, vmsize = 0;
+      std::string line;
+      while (std::getline(file, line)) {
+        std::istringstream iss(line);
+        std::string key;
+        size_t value;
+        std::string unit;
+        iss >> key >> value >> unit;
+        if (key == "VmRSS:") {
+          vmrss = value;
+        } else if (key == "VmSize:") {
+          vmsize = value;
+        }
+        if (vmrss && vmsize) {
           break;
         }
       }
 
-      rss_mem_ = rss_mem_ > vmrss_num ? rss_mem_ : vmrss_num;
-      vsz_mem_ = vsz_mem_ > vm_size_num ? vsz_mem_ : vm_size_num;
-      fclose(fd);
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-  }
+      file.close();
 
-  void GetGpuMemory() {
-    while (run_.load()) {
-      size_t free_bytes;
-      size_t total_bytes;
+      {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        max_rss_mem_ = std::max(max_rss_mem_, vmrss);
+        max_vsz_mem_ = std::max(max_vsz_mem_, vmsize);
+      }
+
+      size_t free_bytes, total_bytes;
       auto status = cudaMemGetInfo(&free_bytes, &total_bytes);
-//       unsigned int count;
-//       nvmlProcessInfo_t infos;
-// #define NVML_NO_UNVERSIONED_FUNC_DEFS 1
-//       nvmlDeviceGetComputeRunningProcesses_v2(device_, &count, &infos);
-      // std::cout << "count is " << count << std::endl;
       if (status != cudaSuccess) {
-        std::cerr << "Error: cudaMemGetInfo fails, "
-                  << cudaGetErrorString(status) << std::endl;
+        std::cerr << "Error: cudaMemGetInfo fails, " << cudaGetErrorString(status) << std::endl;
         exit(1);
       }
 
-      auto used = total_bytes - free_bytes;
-      gpu_mem_ = gpu_mem_ > used ? gpu_mem_ : used;
+      {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        max_gpu_mem_ = std::max(max_gpu_mem_, total_bytes - free_bytes);
+      }
+      RecordMemInfo();
 
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      std::this_thread::sleep_for(std::chrono::milliseconds(period_ms_));
+    }
+  }
+
+  void Stop() {
+    run_.store(false);
+    if (monitor_thread_.joinable()) {
+      monitor_thread_.join();
+    }
+  }
+
+  void RecordMemInfo() {
+    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::stringstream timestamp;
+    timestamp << std::put_time(std::localtime(&now), "%Y-%m-%d %H:%M:%S");
+
+    std::lock_guard<std::mutex> lock(data_mutex_);
+
+    std::stringstream output;
+    output << timestamp.str() << ", " << max_rss_mem_ << ", " << max_vsz_mem_ << ", " << max_gpu_mem_ / 1024.0 / 1024.0
+           << "\n";
+
+    if (to_file_) {
+      output_stream_ << output.str();
+    }
+  }
+
+  void PrintMaxMemInfo() {
+    std::cout << "Max CPU Memory (VmRSS): " << max_rss_mem_ << " KB\n";
+    std::cout << "Max Virtual Memory (VmSize): " << max_vsz_mem_ << " KB\n";
+    std::cout << "Max GPU Memory: " << max_gpu_mem_ / 1024.0 / 1024.0 << " MB\n";
+    if (to_file_) {
+      std::cout << "Memory usage data has been written to " << output_file_ << std::endl;
     }
   }
 
 private:
   std::atomic<bool> run_;
-  size_t rss_mem_ = 0;
-  size_t vsz_mem_ = 0;
-  size_t gpu_mem_ = 0;
-  std::thread gpu_mem_thread_;
-  std::thread cpu_mem_thread_;
-  nvmlDevice_t device_;
+  size_t max_rss_mem_ = 0;
+  size_t max_vsz_mem_ = 0;
+  size_t max_gpu_mem_ = 0;
+  std::thread monitor_thread_;
+  bool to_file_;
+  std::string output_file_;
+  int period_ms_;
+  std::ofstream output_stream_;
+  std::mutex data_mutex_;
 };

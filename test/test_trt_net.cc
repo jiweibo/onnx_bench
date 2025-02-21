@@ -41,7 +41,7 @@ inline void FillTensor(core::Tensor& t) {
 
 int main() {
   ModelOptions model;
-  model.model = "lidar_second_stage.onnx";
+  model.model = "lss_add_animal_train_23_250115_epoch_10_iter_96000.onnx";
   model.format = ModelFormat::kONNX;
 
   BuildOptions build;
@@ -61,11 +61,12 @@ int main() {
   profile["min_intensity"] = b;
   profile["mean_intensity"] = b;
   profile["std_intensity"] = b;
+  profile["velocity"] = b;
   build.optProfiles.emplace_back(profile);
 
-  build.save = true;
+  build.save = false;
   build.load = true;
-  build.engine = "lidar_test_fp16.engine";
+  build.engine = "lss_add_animal_train_23_250115_epoch_10_iter_96000_fp16_1-96_30x.engine";
 
   SystemOptions sys;
   InferenceOptions inference;
@@ -83,6 +84,7 @@ int main() {
   core::Tensor min_intensity(core::Dims{1}, core::DataType::kFLOAT, core::Location::kHOST, 0);
   core::Tensor mean_intensity(core::Dims{1}, core::DataType::kFLOAT, core::Location::kHOST, 0);
   core::Tensor std_intensity(core::Dims{1}, core::DataType::kFLOAT, core::Location::kHOST, 0);
+  core::Tensor velocity(core::Dims{1}, core::DataType::kFLOAT, core::Location::kHOST, 0);
   FillTensor(camera_input);
   FillTensor(lidar_input);
   FillTensor(camera_validation);
@@ -95,6 +97,7 @@ int main() {
   FillTensor(min_intensity);
   FillTensor(mean_intensity);
   FillTensor(std_intensity);
+  FillTensor(velocity);
   LOG(INFO) << "FillTensor done";
 
   inputs.emplace("camera_input", camera_input);
@@ -109,6 +112,7 @@ int main() {
   inputs.emplace("min_intensity", min_intensity);
   inputs.emplace("mean_intensity", mean_intensity);
   inputs.emplace("std_intensity", std_intensity);
+  inputs.emplace("velocity", velocity);
 
   net.Run(inputs);
   LOG(INFO) << "Net run done";

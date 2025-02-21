@@ -529,7 +529,6 @@ int main(int argc, char** argv) {
     inputs.emplace(name, std::move(ort_tensor));
   }
   MemoryUse memuse(FLAGS_device_id);
-  memuse.Start();
 
   for (size_t i = 0; i < 100; ++i)
     auto outs = session.RunWithBind(inputs);
@@ -544,9 +543,4 @@ int main(int argc, char** argv) {
             << ", variance: " << timer_run_d2h.ComputeVariance() << ", tp99: " << timer_run_d2h.ComputePercentile(0.99);
   LOG(INFO) << "H2D+RUN+D2H time " << timer_h2d.GetAverageTime() + timer_run_d2h.GetAverageTime();
 
-  auto [vss, rss, gpu_mem] = memuse.GetMemInfo();
-  memuse.Stop();
-  LOG(INFO) << "vss: " << vss / 1024. << " MB";
-  LOG(INFO) << "rss: " << rss / 1024. << " MB";
-  LOG(INFO) << "gpu_mem: " << gpu_mem / 1024. / 1024. << " MB";
 }

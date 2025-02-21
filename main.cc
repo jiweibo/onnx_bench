@@ -18,9 +18,15 @@
 
 #include "dataset.h"
 
+#if ORT_API_VERSION > 18
+#include "onnxruntime/tensorrt_provider_options.h"
+#include "onnxruntime//onnxruntime_c_api.h"
+#include "onnxruntime//onnxruntime_cxx_api.h"
+#else
 #include "onnxruntime/core/providers/tensorrt/tensorrt_provider_options.h"
 #include "onnxruntime/core/session/onnxruntime_c_api.h"
 #include "onnxruntime/core/session/onnxruntime_cxx_api.h"
+#endif
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -372,7 +378,7 @@ void SetTrtProviders(Ort::SessionOptions& session_options) {
       trt_opt.trt_int8_enable ? FLAGS_calibrationName.c_str() : "";
   trt_opt.trt_dump_subgraphs = false;
 
-  trt_opt.trt_filter_ops = FLAGS_trtFilterOps.c_str();
+  //trt_opt.trt_filter_ops = FLAGS_trtFilterOps.c_str();
   // trt_opt.trt_prefer_precision_ops = FLAGS_trtPreferPrecisionOps.c_str();
   // trt_opt.trt_prefer_precision_nodes = FLAGS_trtPreferPrecisionNodes.c_str();
   // trt_opt.trt_force_precision_ops = FLAGS_trtForcePrecisionOps.c_str();
@@ -760,14 +766,8 @@ int main(int argc, char** argv) {
 
   Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "infer_demo");
   auto session = InitSession(env, FLAGS_onnx);
-  MemoryUse memuse(0);
-  memuse.Start();
+  MemoryUse mem_use(0, true);
   Run(session);
-  auto [vss, rss, gpu_mem] = memuse.GetMemInfo();
-  memuse.Stop();
-  LOG(INFO) << "vss: " << vss / 1024. << " MB";
-  LOG(INFO) << "rss: " << rss / 1024. << " MB";
-  LOG(INFO) << "gpu_mem: " << gpu_mem / 1024. / 1024. << " MB";
 
   if (FLAGS_dataDir != "") {
     RunDataSet(session);

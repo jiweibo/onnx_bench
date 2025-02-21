@@ -127,7 +127,7 @@ inline std::vector<int64_t> GetShape(const ifx::IONode& node) {
   case ifx::TensorFormat::TENSOR_FORMAT_NWHC:
     shape = {node.sN, node.sW, node.sH, node.sC};
     break;
-  case ifx::TensorFormat::TENSOR_FORMAT_NCHWD:
+  case ifx::TensorFormat::TENSOR_FORMAT_NCDHW:
     shape = {node.sN, node.sC, node.sD, node.sH, node.sW};
     break;
   case ifx::TensorFormat::TENSOR_FORMAT_HW:

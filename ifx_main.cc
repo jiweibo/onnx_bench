@@ -39,7 +39,6 @@
 
 using namespace ifx_sess;
 
-// DEFINE_string(ifx, "", "ifx model file");
 DEFINE_string(ifxs, "", "a.ifxmodel b.ifxmodel c.ifxmodel <d.ifxmodel e.ifxmodel> ....");
 DEFINE_string(bs, "", "1 12 1 <1 3> ...");
 DEFINE_string(ifx_threads, "", "1 1 1 1 ...");
@@ -51,7 +50,6 @@ DEFINE_int32(repeats, 1, "repeats");
 DEFINE_string(precision, "fp32", "fp32, fp16, int8");
 DEFINE_string(cacheDir, "", "the cache dir");
 
-// DEFINE_string(provider, "cpu", "cpu, openvino, cuda, trt");
 // DEFINE_string(
 //     dumpOutput, "",
 //     "Save the output tensor(s) of the last inference iteration in a npz file"
@@ -200,24 +198,6 @@ std::vector<std::vector<std::string>> GetIfxModels(const std::string& ifxs) {
   return result;
 }
 
-// a.ifxmodel;b.ifxmodel
-std::vector<std::string> GetModels(const std::string& ifxs) {
-  std::vector<std::string> res;
-  int pos = 0;
-  const char* sep = " ";
-
-  size_t found = ifxs.find(sep, pos);
-  while (found != std::string::npos) {
-    auto s = ifxs.substr(pos, found - pos);
-    res.push_back(s);
-    pos = found + 1;
-    found = ifxs.find(sep, pos);
-  }
-  auto s = ifxs.substr(pos, found - pos);
-  res.push_back(s);
-  return res;
-}
-
 // "-1 1 <16 32> 2" -> {{-1}, {1}, {16, 32}, {2}}
 std::vector<std::vector<int>> ParseBatches(const std::string& str) {
   std::vector<std::vector<int>> result;
@@ -306,6 +286,9 @@ void RunCascade(std::vector<std::unique_ptr<Ifx_Sess>>& sessions, std::vector<Nv
 
   std::vector<StopWatchTimer> timers(sessions.size());
   for (size_t repeat = 0; repeat < repeats; ++repeat) {
+    if (repeat % 50 == 0) {
+      LOG(INFO) << repeat;
+    }
     if (barrier)
       barrier->Wait();
     // std::uniform_int_distribution<> dis(0, 300);
@@ -335,15 +318,16 @@ int main(int argc, char** argv) {
   LOG(INFO) << "CUDA Driver: " << nvml.GetCudaDriverVersion();
   LOG(INFO) << "Driver: " << nvml.GetDriverVersion();
   LOG(INFO) << "NVML: " << nvml.GetNvmlVersion();
-  LOG(INFO) << "sm_clock: " << nvml.GetNvmlStats().sm_clock;
-  LOG(INFO) << "mem_clock: " << nvml.GetNvmlStats().memory_clock;
-  LOG(INFO) << "Temperature: " << nvml.GetNvmlStats().temperature;
-  LOG(INFO) << "Performance Stat: " << nvml.GetNvmlStats().performance_stat;
-  LOG(INFO) << "Power Usage: " << nvml.GetNvmlStats().power_usage;
-  LOG(INFO) << "PCIE GEN: " << nvml.GetNvmlStats().cur_pcie_link_gen;
-  LOG(INFO) << "PCIE Width: " << nvml.GetNvmlStats().cur_pcie_link_width;
-  LOG(INFO) << "PCIE Speed: " << nvml.GetNvmlStats().pcie_speed;
-  LOG(INFO) << "Mem Bus Width: " << nvml.GetNvmlStats().mem_bus_width;
+  auto nvml_stats = nvml.GetNvmlStats();
+  LOG(INFO) << "sm_clock: " << nvml_stats.sm_clock;
+  LOG(INFO) << "mem_clock: " << nvml_stats.memory_clock;
+  LOG(INFO) << "Temperature: " << nvml_stats.temperature;
+  LOG(INFO) << "Performance Stat: " << nvml_stats.performance_stat;
+  LOG(INFO) << "Power Usage: " << nvml_stats.power_usage;
+  LOG(INFO) << "PCIE GEN: " << nvml_stats.cur_pcie_link_gen;
+  LOG(INFO) << "PCIE Width: " << nvml_stats.cur_pcie_link_width;
+  LOG(INFO) << "PCIE Speed: " << nvml_stats.pcie_speed;
+  LOG(INFO) << "Mem Bus Width: " << nvml_stats.mem_bus_width;
 
   if (FLAGS_ifxs == "") {
     LOG(FATAL) << "Please set --ifxs flag.";
@@ -409,12 +393,8 @@ int main(int argc, char** argv) {
                streams.empty() ? nullptr : streams[i], FLAGS_warmup);
   }
 
-  // LOG(INFO) << "Util gpu: " << nvml.GetNvmlStats().utilization.gpu;
-  // LOG(INFO) << "Util mem: " << nvml.GetNvmlStats().utilization.memory;
-
   LOG(INFO) << "--------- Warmup done ---------";
-  MemoryUse checker(configs[0][0].device_id);
-  checker.Start();
+  MemoryUse mem_use(configs[0][0].device_id, true);
 
   int thread_num = 0;
   for (size_t i = 0; i < ifx_threads.size(); ++i) {
@@ -428,14 +408,5 @@ int main(int argc, char** argv) {
     threads[i].join();
   }
 
-  auto mem = checker.GetMemInfo();
-  auto vsz = std::get<0>(mem);
-  auto rss = std::get<1>(mem);
-  auto gpu = std::get<2>(mem);
-  checker.Stop();
-
-  std::cout << "vsz: " << vsz / 1024.0 << std::endl;
-  std::cout << "rss: " << rss / 1024.0 << std::endl;
-  std::cout << "gpu: " << gpu / (1024.0 * 1024.0) << std::endl;
   return 0;
 }
