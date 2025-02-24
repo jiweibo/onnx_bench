@@ -16,8 +16,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "onnxruntime/core/session/onnxruntime_c_api.h"
-#include "onnxruntime/core/session/onnxruntime_cxx_api.h"
+#include "onnxruntime/onnxruntime_c_api.h"
+#include "onnxruntime/onnxruntime_cxx_api.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>

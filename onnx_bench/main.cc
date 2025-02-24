@@ -20,8 +20,8 @@
 
 #if ORT_API_VERSION > 18
 #include "onnxruntime/tensorrt_provider_options.h"
-#include "onnxruntime//onnxruntime_c_api.h"
-#include "onnxruntime//onnxruntime_cxx_api.h"
+#include "onnxruntime/onnxruntime_c_api.h"
+#include "onnxruntime/onnxruntime_cxx_api.h"
 #else
 #include "onnxruntime/core/providers/tensorrt/tensorrt_provider_options.h"
 #include "onnxruntime/core/session/onnxruntime_c_api.h"

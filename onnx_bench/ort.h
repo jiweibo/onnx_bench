@@ -1,3 +1,5 @@
+#pragma once
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -13,15 +15,16 @@
 
 #include "core/core.h"
 
-#include "onnxruntime/core/providers/tensorrt/tensorrt_provider_options.h"
-#include "onnxruntime/core/session/onnxruntime_c_api.h"
-#include "onnxruntime/core/session/onnxruntime_cxx_api.h"
+#include "onnxruntime/onnxruntime_c_api.h"
+#include "onnxruntime/onnxruntime_cxx_api.h"
+#include "onnxruntime/tensorrt_provider_options.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
 
 #include "gflags/gflags.h"
 #include "glog/logging.h"
+#include "utils/random_value.h"
 #include "utils/timer.h"
 
 struct SessConfig {
@@ -29,18 +32,21 @@ struct SessConfig {
   int device_id;
   int intra_op_num_threads;
   OrtLoggingLevel log_level;
-  GraphOptimizationLevel opt_level;
+  GraphOptimizationLevel opt_level{ORT_DISABLE_ALL};
 
-  bool use_cuda;
-  bool use_trt;
+  bool use_cuda{false};
+  bool use_trt{false};
   struct TrtConfig {
     size_t min_subgraph_size;
     size_t max_workspace_size;
-    std::string precision; // fp16, fp32.
+    bool enable_fp16{false};
+    bool enable_int8{false};
     std::string cache_dir;
-    bool enable_int8;
     std::string calibration_table_name;
-    std::string filter_ops;
+    std::string trt_profile_min_shapes;
+    std::string trt_profile_max_shapes;
+    std::string trt_profile_opt_shapes;
+    // std::string filter_ops;
   } trt_config;
   bool use_openvino;
 };
@@ -144,7 +150,8 @@ public:
     auto info = ort_val_.GetTensorTypeAndShapeInfo();
     dims_ = info.GetShape();
     dtype_ = ToDataType(info.GetElementType());
-    location_ = ort_val_.GetLocation().GetAllocatorName() == "Cuda" ? core::Location::kDEVICE : core::Location::kHOST;
+    location_ = ort_val_.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU ? core::Location::kDEVICE
+                                                                                              : core::Location::kHOST;
     external_size_ = dims_.Numel() * core::DataTypeSize(dtype_);
     if (dtype_ == core::DataType::kFLOAT) { // maps to c type float
       if (location_ == core::Location::kDEVICE) {
@@ -208,93 +215,6 @@ public:
 private:
   Ort::Value ort_val_{nullptr};
 };
-
-// class Tensor {
-// public:
-//   explicit Tensor(const std::string& name, void* data, std::vector<int64_t> dims, ONNXTensorElementDataType dtype,
-//                   bool on_gpu)
-//       : name(name), data(data), dims(dims), dtype(dtype), on_gpu(on_gpu) {}
-
-//   explicit Tensor(const std::string& name, Ort::Value&& v) : name(name), ort_val_(std::move(v)) {
-//     if (!ort_val_.IsTensor()) {
-//       LOG(FATAL) << name << " is not Tensor";
-//     }
-//     auto info = ort_val_.GetTensorTypeAndShapeInfo();
-//     dims = info.GetShape();
-//     dtype = info.GetElementType();
-//     on_gpu = ort_val_.GetLocation().GetAllocatorName() == "Cuda";
-//     if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) { // maps to c type float
-//       data = ort_val_.GetTensorMutableData<float>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) { // maps to c type uint8_t
-//       data = ort_val_.GetTensorMutableData<uint8_t>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8) { // maps to c type int8_t
-//       data = ort_val_.GetTensorMutableData<int8_t>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16) { // maps to c
-//                                                                 // type uint16_t
-//       data = ort_val_.GetTensorMutableData<uint16_t>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16) { // maps to c type int16_t
-//       data = ort_val_.GetTensorMutableData<int16_t>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) { // maps to c type int32_t
-//       data = ort_val_.GetTensorMutableData<int32_t>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) { // maps to c type int64_t
-//       data = ort_val_.GetTensorMutableData<int64_t>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
-//       data = ort_val_.GetTensorMutableData<bool>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-//       data = ort_val_.GetTensorMutableData<__half>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE) { // maps to c type double
-//       data = ort_val_.GetTensorMutableData<double>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32) { // maps to c
-//                                                                 // type uint32_t
-//       data = ort_val_.GetTensorMutableData<uint32_t>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64) { // maps to c
-//                                                                 // type uint64_t
-//       data = ort_val_.GetTensorMutableData<uint64_t>();
-//     } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) { // Non-IEEE
-//                                                                   // floating-point
-//                                                                   // format based on
-//                                                                   // IEEE754
-//                                                                   // single-precision
-//       data = ort_val_.GetTensorMutableData<uint16_t>();
-//     } else {
-//       LOG(FATAL) << "Not supported dtype " << static_cast<int>(dtype);
-//     }
-//   }
-
-//   Tensor(Tensor&& other) {
-//     if (other.ort_val_) {
-//       this->ort_val_ = std::move(other.ort_val_);
-//     }
-
-//     this->name = other.name;
-//     this->data = other.data;
-//     this->dims = other.dims;
-//     this->dtype = other.dtype;
-//     this->on_gpu = other.on_gpu;
-//   }
-
-//   Tensor& operator=(Tensor&& other) {
-//     if (other.ort_val_) {
-//       this->ort_val_ = std::move(other.ort_val_);
-//     }
-
-//     this->name = other.name;
-//     this->data = other.data;
-//     this->dims = other.dims;
-//     this->dtype = other.dtype;
-//     this->on_gpu = other.on_gpu;
-//     return *this;
-//   }
-
-//   std::string name;
-//   void* data;
-//   std::vector<int64_t> dims;
-//   ONNXTensorElementDataType dtype;
-//   bool on_gpu;
-
-// private:
-//   Ort::Value ort_val_{nullptr};
-// };
 
 class Sess {
 public:
@@ -405,6 +325,8 @@ public:
   const std::vector<ONNXTensorElementDataType>& InputDtypes() { return input_types_; }
   const std::vector<ONNXTensorElementDataType>& OutputDtypes() { return output_types_; }
 
+  SessConfig Config() { return config_; }
+
 private:
   void SetCudaProviders(int dev_id = 0) {
     OrtCUDAProviderOptions cuda_opt;
@@ -418,29 +340,59 @@ private:
   }
 
   void SetTrtProviders() {
-    OrtTensorRTProviderOptions trt_opt{};
-    trt_opt.device_id = config_.device_id;
-    trt_opt.has_user_compute_stream = false;
-    trt_opt.user_compute_stream = nullptr;
-    trt_opt.trt_max_partition_iterations = 1000;
-    trt_opt.trt_min_subgraph_size = config_.trt_config.min_subgraph_size;
-    trt_opt.trt_max_workspace_size = config_.trt_config.max_workspace_size;
-    trt_opt.trt_fp16_enable = config_.trt_config.precision == "fp16";
-    trt_opt.trt_int8_enable = config_.trt_config.enable_int8;
-    trt_opt.trt_engine_cache_enable = config_.trt_config.cache_dir != "";
-    trt_opt.trt_engine_cache_path = config_.trt_config.cache_dir.c_str();
-    trt_opt.trt_int8_calibration_table_name =
-        trt_opt.trt_int8_enable ? config_.trt_config.calibration_table_name.c_str() : "";
-    trt_opt.trt_dump_subgraphs = false;
-
-    trt_opt.trt_filter_ops = config_.trt_config.filter_ops.c_str();
-    // trt_opt.trt_prefer_precision_ops = FLAGS_trtPreferPrecisionOps.c_str();
-    // trt_opt.trt_prefer_precision_nodes =
-    // FLAGS_trtPreferPrecisionNodes.c_str(); trt_opt.trt_force_precision_ops =
-    // FLAGS_trtForcePrecisionOps.c_str(); trt_opt.trt_force_precision_nodes =
-    // FLAGS_trtForcePrecisionNodes.c_str();
-
-    session_options_.AppendExecutionProvider_TensorRT(trt_opt);
+    const auto& api = Ort::GetApi();
+    OrtTensorRTProviderOptionsV2* tensorrt_options;
+    Ort::ThrowOnError(api.CreateTensorRTProviderOptions(&tensorrt_options));
+    std::vector<const char*> option_keys = {
+        "device_id",                    //
+        "trt_max_workspace_size",       //
+        "trt_max_partition_iterations", //
+        "trt_min_subgraph_size",        //
+        "trt_fp16_enable",              //
+        "trt_int8_enable",              //
+        "trt_dump_subgraphs",           //
+        "trt_engine_cache_enable",      //
+        "trt_detailed_build_log",       //
+        // "trt_layer_norm_fp32_fallback",
+        "trt_builder_optimization_level",
+    };
+    std::string device_id = std::to_string(config_.device_id);
+    std::string max_workspace_size = std::to_string(config_.trt_config.max_workspace_size);
+    std::string min_subgraph_size = std::to_string(config_.trt_config.min_subgraph_size);
+    std::vector<const char*> option_values = {
+        device_id.c_str(),
+        max_workspace_size.c_str(),
+        "1000",
+        min_subgraph_size.c_str(),
+        config_.trt_config.enable_fp16 ? "1" : "0",
+        config_.trt_config.enable_int8 ? "1" : "0",
+        "0",
+        config_.trt_config.cache_dir.empty() ? "0" : "1",
+        config_.log_level == ORT_LOGGING_LEVEL_VERBOSE ? "1" : "0",
+        // "1",
+        "3",
+    };
+    if (!config_.trt_config.cache_dir.empty()) {
+      option_keys.push_back("trt_engine_cache_path");
+      option_values.push_back(config_.trt_config.cache_dir.c_str());
+      option_keys.push_back("trt_timing_cache_enable");
+      option_values.push_back("1");
+      option_keys.push_back("trt_timing_cache_path");
+      option_values.push_back(config_.trt_config.cache_dir.c_str());
+    }
+    if (!config_.trt_config.trt_profile_min_shapes.empty()) {
+      CHECK_EQ(config_.trt_config.trt_profile_max_shapes.empty(), false);
+      CHECK_EQ(config_.trt_config.trt_profile_opt_shapes.empty(), false);
+      option_keys.push_back("trt_profile_min_shapes");
+      option_values.push_back(config_.trt_config.trt_profile_min_shapes.c_str());
+      option_keys.push_back("trt_profile_max_shapes");
+      option_values.push_back(config_.trt_config.trt_profile_max_shapes.c_str());
+      option_keys.push_back("trt_profile_opt_shapes");
+      option_values.push_back(config_.trt_config.trt_profile_opt_shapes.c_str());
+    }
+    Ort::ThrowOnError(api.UpdateTensorRTProviderOptions(tensorrt_options, option_keys.data(), option_values.data(),
+                                                        option_keys.size()));
+    session_options_.AppendExecutionProvider_TensorRT_V2(*tensorrt_options);
   }
 
   void SetCpuProviders() {}
@@ -462,7 +414,6 @@ private:
   void InitSession() {
     session_options_.SetIntraOpNumThreads(config_.intra_op_num_threads);
     session_options_.SetGraphOptimizationLevel(config_.opt_level);
-
     if (config_.use_trt) {
       SetTrtProviders();
     }
@@ -473,7 +424,6 @@ private:
       // SetOpenVINOProviders();
     }
     SetCpuProviders();
-
     auto session_start = std::chrono::high_resolution_clock::now();
     session_.reset(new Ort::Session(env_, config_.onnx_file.c_str(), session_options_));
     auto session_end = std::chrono::high_resolution_clock::now();
@@ -558,3 +508,30 @@ private:
   std::vector<std::function<void(void)>> before_run_d2h_hook_;
   std::vector<std::function<void(void)>> after_run_d2h_hook_;
 };
+
+inline void RandomFillTensor(core::TensorRef& tensor) {
+  auto num = tensor->Numel();
+  auto dtype = tensor->GetDataType();
+  switch (dtype) {
+  case core::DataType::kFLOAT:
+    FillBuffer<float>(tensor->HostData(), num, -1., 1.f);
+    break;
+  case core::DataType::kBOOL:
+    FillBuffer<bool>(tensor->HostData(), num, 0, 1);
+    break;
+  case core::DataType::kUINT8:
+    FillBuffer<uint8_t>(tensor->HostData(), num, 0, 255);
+    break;
+  case core::DataType::kINT8:
+  case core::DataType::kINT32:
+  case core::DataType::kINT64:
+    FillBuffer<int32_t>(tensor->HostData(), num, 0, 127);
+    break;
+  case core::DataType::kHALF:
+  case core::DataType::kBF16:
+  case core::DataType::kFP8:
+  case core::DataType::kINT4:
+  default:
+    LOG(FATAL) << "Not supported dtype " << static_cast<int>(dtype);
+  }
+}

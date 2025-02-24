@@ -13,7 +13,6 @@
 
 #include <glog/logging.h>
 
-#include "NvInferRuntimePlugin.h"
 #include "utils/util.h"
 
 namespace core {
