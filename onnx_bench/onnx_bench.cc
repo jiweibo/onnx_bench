@@ -14,8 +14,11 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include "cnpy.h"
+#include "core/core.h"
 #include "gflags/gflags.h"
 #include "glog/logging.h"
 
@@ -42,6 +45,9 @@ DEFINE_uint64(max_workspace_size, 1UL << 31, "trt max workspace size");
 DEFINE_string(trt_profile_min_shapes, "", "in1:1x8,in2:1x3x224x224");
 DEFINE_string(trt_profile_max_shapes, "", "in1:8x8,in2:8x3x224x224");
 DEFINE_string(trt_profile_opt_shapes, "", "in1:8x8,in2:8x3x224x224");
+
+DEFINE_string(input_data, "", "Load npz input file (default = generate random inputs).");
+DEFINE_string(dump_output, "", "dump output to npz.");
 
 namespace {
 // Helper function to split a string by a delimiter and return a vector of
@@ -110,21 +116,79 @@ std::vector<SessConfig> ParseFlags(const std::vector<std::string>& onnx_models) 
   return configs;
 }
 
+cnpy::npz_t LoadNpzFile(const std::string& str) {
+  cnpy::npz_t res = cnpy::npz_load(str);
+  return res;
+}
+
+std::map<std::string, std::shared_ptr<core::Tensor>> ConvertNpzToTensor(const cnpy::npz_t& npz, Sess* sess) {
+  std::map<std::string, std::shared_ptr<core::Tensor>> tensors;
+  auto input_names = sess->InputNames();
+  auto input_dtypes = sess->InputDtypes();
+  for (size_t i = 0; i < input_names.size(); ++i) {
+    // LOG(INFO) << input_names[i];
+    // for (size_t j = 0; j < npz.at(input_names[i]).shape.size(); ++j) {
+    //   LOG(INFO) << npz.at(input_names[i]).shape[j];
+    // }
+    void* data = &(*npz.at(input_names[i]).data_holder)[0];
+    auto tensor = std::make_shared<core::Tensor>(data, npz.at(input_names[i]).num_bytes(),
+                                                 core::Dims(npz.at(input_names[i]).shape), ToDataType(input_dtypes[i]));
+    tensors.emplace(std::make_pair(input_names[i], std::move(tensor)));
+  }
+
+  return tensors;
+}
+
+void DumpOutputTensors(const std::map<std::string, std::shared_ptr<core::Tensor>>& tensors) {
+  for (auto it = tensors.begin(); it != tensors.end(); ++it) {
+    auto& name = it->first;
+    auto tensor = it->second;
+    auto dtype = tensor->GetDataType();
+    auto shape = tensor->GetDims().ToStdVec<size_t>();
+    if (dtype == core::DataType::kFLOAT) {
+      auto* data = tensor->HostData<float>();
+      cnpy::npz_save(FLAGS_dump_output, name, data, shape, "a");
+    } else if (dtype == core::DataType::kHALF) {
+      auto* data = tensor->HostData<__half>();
+      cnpy::npz_save(FLAGS_dump_output, name, data, shape, "a");
+    } else if (dtype == core::DataType::kINT32) {
+      auto* data = tensor->HostData<int>();
+      cnpy::npz_save(FLAGS_dump_output, name, data, shape, "a");
+    } else if (dtype == core::DataType::kINT64) {
+      auto* data = tensor->HostData<int64_t>();
+      cnpy::npz_save(FLAGS_dump_output, name, data, shape, "a");
+    } else if (dtype == core::DataType::kBOOL) {
+      auto* data = tensor->HostData<bool>();
+      cnpy::npz_save(FLAGS_dump_output, name, data, shape, "a");
+    } else if (dtype == core::DataType::kUINT8) {
+      auto* data = tensor->HostData<uint8_t>();
+      cnpy::npz_save(FLAGS_dump_output, name, data, shape, "a");
+    } else {
+      LOG(FATAL) << "Not supported data type " << static_cast<int>(dtype);
+    }
+  }
+}
+
 void Run(std::unique_ptr<Sess>& session, int batch = -1, Barrier* barrier = nullptr, int repeats = 1) {
   auto in_tensor_num = session->InputDtypes().size();
   std::map<std::string, std::shared_ptr<core::Tensor>> in_tensors;
-
-  for (size_t j = 0; j < session->InputNames().size(); ++j) {
-    auto& name = session->InputNames()[j];
-    auto in_dims = session->InputDims()[j];
-    if (batch != -1)
-      in_dims[0] = batch;
-    if (in_dims[0] == -1)
-      in_dims[0] = 1;
-    auto tensor = std::make_shared<core::Tensor>(core::Dims(in_dims), ToDataType(session->InputDtypes()[j]),
-                                                 core::Location::kHOST);
-    RandomFillTensor(tensor);
-    in_tensors.emplace(name, tensor);
+  cnpy::npz_t npz;
+  if (FLAGS_input_data != "") {
+    npz = LoadNpzFile(FLAGS_input_data);
+    in_tensors = ConvertNpzToTensor(npz, session.get());
+  } else {
+    for (size_t j = 0; j < session->InputNames().size(); ++j) {
+      auto& name = session->InputNames()[j];
+      auto in_dims = session->InputDims()[j];
+      if (batch != -1)
+        in_dims[0] = batch;
+      if (in_dims[0] == -1)
+        in_dims[0] = 1;
+      auto tensor = std::make_shared<core::Tensor>(core::Dims(in_dims), ToDataType(session->InputDtypes()[j]),
+                                                   core::Location::kHOST);
+      RandomFillTensor(tensor);
+      in_tensors.emplace(name, tensor);
+    }
   }
 
   StopWatchTimer timer;
@@ -137,6 +201,10 @@ void Run(std::unique_ptr<Sess>& session, int batch = -1, Barrier* barrier = null
     timer.Start();
     auto out_tensors = session->RunWithBind(in_tensors);
     timer.Stop();
+
+    if (repeat == repeats - 1 && FLAGS_dump_output != "") {
+      DumpOutputTensors(out_tensors);
+    }
   }
 
   LOG(INFO) << std::this_thread::get_id() << " " << session->Config().onnx_file << " time is " << timer.GetAverageTime()
