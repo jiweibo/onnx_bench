@@ -27,6 +27,8 @@
 #include "utils/random_value.h"
 #include "utils/timer.h"
 
+#define SUPPORT_FILTER_NODES 0
+
 struct SessConfig {
   std::string onnx_file;
   int device_id;
@@ -46,7 +48,7 @@ struct SessConfig {
     std::string trt_profile_min_shapes;
     std::string trt_profile_max_shapes;
     std::string trt_profile_opt_shapes;
-    // std::string filter_ops;
+    std::string trt_filter_nodes;
   } trt_config;
   bool use_openvino;
 };
@@ -354,7 +356,7 @@ private:
         "trt_engine_cache_enable",      //
         "trt_detailed_build_log",       //
         // "trt_layer_norm_fp32_fallback",
-        "trt_builder_optimization_level",
+        // "trt_builder_optimization_level",
     };
     std::string device_id = std::to_string(config_.device_id);
     std::string max_workspace_size = std::to_string(config_.trt_config.max_workspace_size);
@@ -370,8 +372,14 @@ private:
         config_.trt_config.cache_dir.empty() ? "0" : "1",
         config_.log_level == ORT_LOGGING_LEVEL_VERBOSE ? "1" : "0",
         // "1",
-        "3",
+        // "3",
     };
+#ifdef SUPPORT_FILTER_NODES
+    if (!config_.trt_config.trt_filter_nodes.empty()) {
+      option_keys.push_back("trt_filter_nodes");
+      option_values.push_back(config_.trt_config.trt_filter_nodes.c_str());
+    }
+#endif
     if (!config_.trt_config.cache_dir.empty()) {
       option_keys.push_back("trt_engine_cache_path");
       option_values.push_back(config_.trt_config.cache_dir.c_str());

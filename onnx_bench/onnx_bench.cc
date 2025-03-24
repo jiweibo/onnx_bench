@@ -46,6 +46,8 @@ DEFINE_string(trt_profile_min_shapes, "", "in1:1x8,in2:1x3x224x224");
 DEFINE_string(trt_profile_max_shapes, "", "in1:8x8,in2:8x3x224x224");
 DEFINE_string(trt_profile_opt_shapes, "", "in1:8x8,in2:8x3x224x224");
 
+DEFINE_string(trt_filter_nodes, "", "node_a,node_b,node_c");
+
 DEFINE_string(input_data, "", "Load npz input file (default = generate random inputs).");
 DEFINE_string(dump_output, "", "dump output to npz.");
 
@@ -105,7 +107,7 @@ std::vector<SessConfig> ParseFlags(const std::vector<std::string>& onnx_models) 
       config.trt_config.trt_profile_min_shapes = FLAGS_trt_profile_min_shapes;
       config.trt_config.trt_profile_max_shapes = FLAGS_trt_profile_max_shapes;
       config.trt_config.trt_profile_opt_shapes = FLAGS_trt_profile_opt_shapes;
-      // config.trt_config.filter_ops = FLAGS_trtFilterOps;
+      config.trt_config.trt_filter_nodes = FLAGS_trt_filter_nodes;
     } else if (FLAGS_provider == "cuda") {
       config.use_cuda = true;
     } else if (FLAGS_provider == "openvino") {
